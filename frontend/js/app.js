@@ -61,6 +61,8 @@ window.addEventListener('scroll', () => {
 }, true);
 
 // ===== 可拖拽分隔条（分隔条在哪，宽度变化就发生在哪） =====
+// 用 Pointer Events 统一鼠标 / 触屏 / 触控笔：平板（iPad 等）上手指可直接拖动三栏宽度
+// 触屏命中区由 CSS 的 @media (pointer: coarse) 加宽到约 24px，这里不再管
 function setupSplitters() {
     const sidebar = document.querySelector('.video-sidebar');
     const chat = document.querySelector('.chat-panel');
@@ -70,26 +72,29 @@ function setupSplitters() {
 
     let isDragging = false;
     let currentSplitter = null;
+    let pointerId = null;
     let startX = 0;
     let startWidth = 0;
     let target = null;  // 本次拖动要改宽度的面板：sidebar 或 chat
 
-    function onMouseDown(e, splitter, panel) {
+    function onPointerDown(e, splitter, panel) {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;   // 鼠标只认左键
         isDragging = true;
         currentSplitter = splitter;
         target = panel;
+        pointerId = e.pointerId;
         startX = e.clientX;
         startWidth = panel.getBoundingClientRect().width;
         splitter.classList.add('dragging');
-        document.body.style.cursor = 'col-resize';
+        document.body.classList.add('col-resizing');
         document.body.style.userSelect = 'none';
+        try { splitter.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
     }
 
-    sideSplit.addEventListener('mousedown', e => onMouseDown(e, sideSplit, sidebar));
-    chatSplit.addEventListener('mousedown', e => onMouseDown(e, chatSplit, chat));
-
-    document.addEventListener('mousemove', e => {
+    function onPointerMove(e) {
         if (!isDragging || !currentSplitter) return;
+        if (pointerId !== null && e.pointerId !== pointerId) return;   // 忽略多指的另一根手指
         const dx = e.clientX - startX;
         const cw = document.querySelector('.main-content').clientWidth;
         const VIDEO_MIN = 160;  // 视频区最小宽度：两侧面板可以一直扩大把视频区挤到这么小
@@ -104,21 +109,34 @@ function setupSplitters() {
             const newWidth = Math.max(120, Math.min(maxW, startWidth - dx));
             chat.style.width = newWidth + 'px';
         }
-    });
+    }
 
-    document.addEventListener('mouseup', () => {
-        if (isDragging && currentSplitter) {
+    function onPointerUp(e) {
+        if (!isDragging) return;
+        if (pointerId !== null && e.pointerId !== undefined && e.pointerId !== pointerId) return;  // 别的指头抬起不影响本次拖动
+        if (currentSplitter) {
             currentSplitter.classList.remove('dragging');
+            if (pointerId !== null) {
+                try { currentSplitter.releasePointerCapture(pointerId); } catch (_) {}
+            }
         }
         isDragging = false;
         currentSplitter = null;
-        document.body.style.cursor = '';
+        pointerId = null;
+        document.body.classList.remove('col-resizing');
         document.body.style.userSelect = '';
-    });
+    }
+
+    sideSplit.addEventListener('pointerdown', e => onPointerDown(e, sideSplit, sidebar));
+    chatSplit.addEventListener('pointerdown', e => onPointerDown(e, chatSplit, chat));
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+    document.addEventListener('pointercancel', onPointerUp);
 }
 
 // ===== 科目切换 =====
 function switchSubject(subject) {
+    // 动态科目（文件中心）：科目 = 顶层文件夹名，tab 由 tree.js 渲染
     state.subject = subject;
     state.conversationId = '';
     state.convModel = '';
@@ -126,10 +144,19 @@ function switchSubject(subject) {
     state.messages = [];
     state.subtitles = [];
     state.currentFolderId = 0;
-    document.querySelectorAll('.subject-tab').forEach(el => el.classList.toggle('active', el.dataset.subject === subject));
-    document.getElementById('chatSubjectLabel').textContent = document.querySelector(`.subject-tab[data-subject="${subject}"]`).textContent;
-    resetPlayer(); clearChat(); loadTree();
-    addSystemMessage(`📚 ${document.querySelector(`.subject-tab[data-subject="${subject}"]`).textContent}`);
+    let label = subject;
+    document.querySelectorAll('.subject-tab').forEach(el => {
+        const active = el.dataset.subject === subject;
+        el.classList.toggle('active', active);
+        if (active) label = el.textContent;
+    });
+    document.getElementById('chatSubjectLabel').textContent = label;
+    // 切科目 = 换一批资料：关闭查看器当前内容（PDF/文本/音频窗格 + agent 的 file_id 上下文），
+    // 否则中间还显示上一个科目的文件，右侧 agent 也继续带着旧文件的上下文
+    if (window.Viewer && window.Viewer.close) { window.Viewer.close(); } else { resetPlayer(); }
+    clearChat();
+    if (window.FSTree) window.FSTree.setSubject(subject); else loadTree();
+    addSystemMessage(`📚 ${subject}`);
     restoreActiveConversation();
 }
 
@@ -148,10 +175,12 @@ function switchMode(mode) {
     document.querySelectorAll('.b-video-cb').forEach(cb => {
         cb.style.display = (mode === 'B') ? 'inline-block' : 'none';
     });
+    // 字幕列表面板已移除，跳过旧展示逻辑
+    const _sp = document.getElementById('subtitlePanel');
+    if (_sp) _sp.style.display = (mode === 'A' && state.currentVideoId) ? 'flex' : 'none';
     // 切换模式时退出批量删除模式（勾选框由 .del-mode class 控制，不常驻）
     if (state.delMode) exitDelMode();
     clearChat(); addSystemMessage(msgs[mode] || '');
-    document.getElementById('subtitlePanel').style.display = (mode === 'A' && state.currentVideoId) ? 'flex' : 'none';
     restoreActiveConversation();
 }
 
@@ -166,23 +195,9 @@ try { const el = document.getElementById('pageLoadCheck'); if (el) el.textConten
 let treeCache = null;
 
 async function loadTree() {
-    const container = document.getElementById('videoTreeBody');
-    if (!container) { console.error('videoTreeBody not found'); return; }
-
-    container.innerHTML = '<div style="padding:20px;color:#333">🔍 正在请求数据...</div>';
-
-    try {
-        const resp = await apiFetch(`/api/folders/tree?subject=${state.subject}`);
-        if (!resp.ok) throw new Error('网络错误');
-        const data = await resp.json();
-        treeCache = data;
-        renderTree(data, getTreeFilter());
-        populateUploadFolderSelect(data.folders || []);
-        // 重新渲染后退出批量模式（勾选框状态不再有效）
-        if (state.delMode) exitDelMode();
-    } catch (err) {
-        container.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><div>${err.message}</div></div>`;
-    }
+    // 文件中心：树渲染已接管给 modules/tree.js（ES module，FSTree）
+    if (window.FSTree) return window.FSTree.refresh();
+    setTimeout(loadTree, 80);   // 模块尚未就绪，稍后重试
 }
 
 // ===== 上传文件夹下拉填充 =====
@@ -494,7 +509,7 @@ async function playVideo(videoId) {
 
     await loadSubtitles(videoId);
 
-    if (state.mode === 'A') document.getElementById('subtitlePanel').style.display = 'flex';
+    // 字幕列表面板已移除（画面字幕覆盖层仍可用，📄 开关控制）
     addSystemMessage(`🎬 播放中`);
 }
 
@@ -512,7 +527,8 @@ function resetPlayer() {
     video.pause(); video.src = ''; video.style.display = 'none';
     placeholder.style.display = 'flex';
     state.currentVideoId = null; state.subtitles = [];
-    document.getElementById('subtitlePanel').style.display = 'none';
+    const _sp = document.getElementById('subtitlePanel');
+    if (_sp) _sp.style.display = 'none';
 }
 
 // ===== 字幕（可点击跳转） =====
@@ -529,6 +545,7 @@ async function loadSubtitles(videoId) {
 function renderSubtitles() {
     const list = document.getElementById('subtitleList');
     const count = document.getElementById('subtitleCount');
+    if (!list) return;   // 字幕列表面板已移除（仅保留画面字幕覆盖层）
     // 列表即将重建，先使 F2 的节点缓存与高亮失效
     subtitleItems = null;
     subtitleLastActiveIdx = -1;
@@ -549,20 +566,10 @@ function renderSubtitles() {
 // ===== 容器全屏（视频+字幕一起全屏）=====
 // ===== 自动截图开关 =====
 function toggleAutoCapture() {
-    state.autoCapture = !state.autoCapture;
-    const btn = document.getElementById('captureToggleBtn');
-    if (state.autoCapture) {
-        btn.style.background = '#1a73e8';
-        btn.style.borderColor = '#1a73e8';
-        addSystemMessage('🎥 已开启：每次提问自动截取当前画面');
-    } else {
-        btn.style.background = '';
-        btn.style.borderColor = '';
-        addSystemMessage('🎥 已关闭自动截图');
-    }
+    // auto-capture removed: use the camera button in chat input (video frame / PDF page)
+    addSystemMessage('INFO: use the camera button in the chat input box instead');
 }
 
-// ===== 全屏（容器全屏：全屏后字幕/倍速/截图按钮仍在） =====
 function isIOS() {
     return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
            (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -576,11 +583,9 @@ function toggleFullscreen() {
         return;
     }
     if (isIOS()) {
-        addSystemMessage('⚠️ iOS Safari 不支持页面全屏，请用 🔄 横屏旋转，或点视频系统控制条的全屏');
+        addSystemMessage('⚠️ iOS Safari 不支持网页全屏，请把设备横过来看，或用系统播放器的全屏');
         return;
     }
-    // 全屏与旋转互斥：进全屏前解除旋转态
-    document.documentElement.classList.remove('rotate-landscape');
     try {
         if (wrapper.requestFullscreen) wrapper.requestFullscreen();
         else if (wrapper.webkitRequestFullscreen) wrapper.webkitRequestFullscreen();
@@ -738,6 +743,7 @@ function updateSubtitleOverlayVisibility() {
 let subtitlePanelVisible = true;
 function toggleSubtitlePanel() {
     const list = document.getElementById('subtitleList');
+    if (!list) return;   // 面板已移除
     const btn = document.getElementById('subtitleToggleBtn');
     subtitlePanelVisible = !subtitlePanelVisible;
     list.style.display = subtitlePanelVisible ? 'block' : 'none';
@@ -745,84 +751,12 @@ function toggleSubtitlePanel() {
 }
 
 // ===== 视频上传 =====
+// 上传统一走文件中心 /api/fs/upload（modules/tree.js 处理去重、子目录与产物管线）
 async function uploadVideo(input) {
-    const file = input.files[0];
-    if (!file) return;
-    if (!file.type.startsWith('video/')) { alert('请选择视频'); return; }
-    if (file.size > 4e9) { alert('最大 4GB'); return; }
-    const fd = new FormData();
-    fd.append('file', file); fd.append('subject', state.subject);
-    fd.append('title', file.name.replace(/\.[^.]+$/, ''));
-    fd.append('folder_id', String(uploadFolderId || 0));
-    try {
-        const resp = await apiFetch('/api/videos/upload', { method: 'POST', body: fd });
-        if (!resp.ok) throw new Error((await resp.json().catch(()=>({}))).detail||'失败');
-        input.value = ''; loadTree();
-        const data = await resp.json();
-        if (data.subtitle_status === 'pending') setTimeout(() => extractSubtitle(data.id), 1000);
-    } catch (err) { addSystemMessage(`⚠️ ${err.message}`); input.value = ''; }
+    if (window.FSTree) return window.FSTree.uploadFromInput(input);
 }
-
 async function uploadFolder(input) {
-    const files = input.files;
-    if (!files || !files.length) { addSystemMessage('⚠️ 未选择任何文件'); input.value=''; return; }
-
-    const exts = ['.mp4','.avi','.mkv','.mov','.wmv','.flv','.webm'];
-    const videos = [];
-    for (const f of files) {
-        const ext = '.' + f.name.split('.').pop().toLowerCase();
-        if (exts.includes(ext)) videos.push(f);
-    }
-    if (!videos.length) { addSystemMessage('⚠️ 文件夹中没有视频文件'); input.value=''; return; }
-
-    const batch = videos.slice(0, 50);
-    addSystemMessage(`📁 找到 ${videos.length} 个视频，上传 ${batch.length} 个...`);
-
-    // 逐个上传 + 提取字幕
-    let success = 0, failed = 0;
-    const uploadedIds = [];
-    for (const file of batch) {
-        try {
-            const fd = new FormData();
-            fd.append('file', file);
-            fd.append('subject', state.subject);
-            fd.append('title', file.name.replace(/\.[^.]+$/, ''));
-            fd.append('folder_id', String(uploadFolderId || 0));
-            const resp = await apiFetch('/api/videos/upload', { method: 'POST', body: fd });
-            if (resp.ok) {
-                const data = await resp.json();
-                uploadedIds.push(data.id);
-                success++;
-            } else {
-                failed++;
-            }
-        } catch (e) {
-            failed++;
-        }
-    }
-
-    addSystemMessage(`✅ 上传完成：成功 ${success} 个${failed ? `，失败 ${failed} 个` : ''}`);
-    input.value = '';
-    loadTree();
-
-    // 逐个提取字幕
-    if (uploadedIds.length > 0) {
-        addSystemMessage('🔄 开始提取字幕...');
-        for (let i = 0; i < uploadedIds.length; i++) {
-            await new Promise(r => setTimeout(r, i * 500));  // 间隔 0.5 秒
-            try {
-                const resp = await apiFetch(`/api/videos/${uploadedIds[i]}/extract-subtitle`, { method: 'POST' });
-                if (resp.ok) {
-                    const d = await resp.json();
-                    addSystemMessage(`✅ 第 ${i+1}/${uploadedIds.length} 个字幕提取完成`);
-                }
-            } catch (e) {
-                addSystemMessage(`⚠️ 第 ${i+1} 个字幕提取失败`);
-            }
-        }
-        addSystemMessage('🎉 全部字幕提取完成！');
-        loadTree();
-    }
+    if (window.FSTree) return window.FSTree.uploadFromInput(input);
 }
 
 // ===== 字幕提取串行队列：一次只识别一个视频（避免并发触发云 ASR 限流），并显示进度 1/N =====
@@ -1030,6 +964,21 @@ async function generateSummary(videoId) {
 // ===== 聊天 =====
 // ask 卡片的待答内容：非空 = 这次发送是"回答 AI 的提问"（作为 tool 结果续上，不再新增用户气泡）
 let pendingAsk = null;
+// 当前页面上「还没作答」的活动卡片。用户不答、直接打字发新消息时，
+// 把这张卡片就地置为「未作答」并禁用，避免它一直可点击、之后提交出一个
+// 早已作废的 tool_call_id（后端会拒绝）。
+let liveAskCard = null;
+
+// 把活动卡片标记为「未作答，已直接继续」（样式与历史里的未作答卡片一致）
+function abandonLiveAskCard() {
+    const card = liveAskCard;
+    liveAskCard = null;
+    if (!card || card.classList.contains('submitted')) return;
+    card.classList.add('unanswered', 'readonly');
+    card.querySelectorAll('input, button').forEach(el => { el.disabled = true; });
+    const foot = card.querySelector('.ask-foot');
+    if (foot) foot.innerHTML = '<span class="ask-hint">未作答，已直接继续</span>';
+}
 
 async function sendMessage() {
     const input = document.getElementById('chatInput');
@@ -1038,7 +987,10 @@ async function sendMessage() {
     const isAskReply = !!pendingAsk;
     if ((!text && !hasImages && !isAskReply) || state.isStreaming) return;
     if (!isAskReply) {
-        const displayText = text || '[查看图片]';
+        abandonLiveAskCard();  // 没答卡片直接发新消息：这张卡片就此作废
+        // 只发图没打字时，后端会把「分析图片」作为正文（下面 fd 里同一份文本），
+        // 气泡也显示同一段，保证「刚发送」和「重载历史」看到的一模一样
+        const displayText = text || (hasImages ? '分析图片' : '');
         input.value = '';
         addUserMessage(displayText, state.images.map(i => i.dataUrl), quoteState ? quoteState.text : '');
     }
@@ -1074,9 +1026,23 @@ async function sendMessage() {
         fd.append('mode', state.mode);
         fd.append('subtitle_context', state.mode === 'A' ? await getModeASubtitleContext() : '');
         fd.append('conversation_id', state.conversationId);
+        // 文件中心：agent 上下文跟随当前查看的文件（页码/时间点一并传给编排器）
+        if (window.FSState && window.FSState.currentFileId()) {
+            fd.append('file_id', String(window.FSState.currentFileId()));
+            const _pos = window.FSState.currentPosition();
+            if (_pos) {
+                // 带上提问文本 → 后端在 chunks 里检索相关片段注入（自定义编排上下文）
+                _pos.hit_query = (text || '').slice(0, 120);
+                fd.append('position', JSON.stringify(_pos));
+            }
+        }
         if (isAskReply) {
-            // ask 回答轮：把用户作答作为 tool 结果回填，后端接着这一轮继续推理
-            fd.append('ask_answers', JSON.stringify(pendingAsk));
+            // ask/quiz 回答轮：把用户作答作为 tool 结果回填，后端接着这一轮继续推理。
+            // 图片单独作为 multipart 字段发（JSON.stringify 序列化不了 File）
+            fd.append('ask_answers', JSON.stringify({
+                tool_call_id: pendingAsk.tool_call_id, answers: pendingAsk.answers,
+            }));
+            (pendingAsk.images || []).forEach(img => fd.append('image', img.file));
             pendingAsk = null;
         }
         if (quoteState && quoteState.text) fd.append('quote', JSON.stringify({ text: quoteState.text }));
@@ -1304,7 +1270,7 @@ async function sendMessage() {
             activeDom.remove();
             streamingEl.querySelector('.msg-time').textContent = time();
             // ask 工具：把 AI 的提问渲染成可交互卡片（提交后作为 tool 结果续上这一轮）
-            if (askEvent && !sseError) renderAskCard(streamingEl, askEvent);
+            if (askEvent && !sseError) renderAskCard(streamingEl, askEvent, askEvent.kind);
             scrollChat();
         }
         if (reasoningStarted && !sseError) {
@@ -1403,6 +1369,8 @@ document.addEventListener('paste', function(e) {
 });
 
 async function getModeASubtitleContext() {
+    // 文件中心：会话绑定文件时，上下文由后端编排器按模板注入（共识 D5），不再传字幕全文
+    if (window.FSState && window.FSState.currentFileId()) return '';
     // 模式A上下文 = 整讲字幕全文 + 当前播放位置。
     // 一节视频的字幕仅 1~1.5 万 token（中文 ~1.2 token/字），对 DeepSeek
     // 的大上下文毫无压力；数学讲解前后依赖强（前 30 分钟定理后 30 分钟引用），
@@ -1650,6 +1618,16 @@ async function finalizeVoice() {
 }
 
 // ===== 消息渲染 =====
+// 历史消息里的图片 src：后端给的是 /api/chat/uploads/xxx 这种站内地址（需带令牌），
+// 也可能是本地待发图的 data: URL（直接原样用）
+function chatImgSrc(src) {
+    const s = String(src || '');
+    if (!s || s.startsWith('data:') || s.startsWith('blob:')) return s;
+    if (/^https?:/i.test(s)) return s;
+    const tk = getApiToken();
+    return getApiUrl(s) + (tk ? `?token=${encodeURIComponent(tk)}` : '');
+}
+
 function addUserMessage(text, imgs, quote) {
     let html = `<div class="message user">`;
     if (quote && quote.trim()) html += `<div class="quote-bubble">📎 引用：${escHtml(quote)}</div>`;
@@ -1676,12 +1654,13 @@ function addSystemMessage(text) {
     scrollChat(true);
 }
 
-// ===== 工具调用提示（read_image / modlens_read_image 等）=====
-// 模型调工具期间给用户一个可见反馈：正在看图 / 已看完
+// ===== 工具调用提示（read 等）=====
+// 模型调工具期间给用户一个可见反馈：正在读文件 / 已读完
 const TOOL_HINTS = {
-    read_image: '📷 查看图片',
-    modlens_read_image: '🔍 用视觉模型识别图片',
+    read: '📄 读取文件',
+    read_image: '📷 查看图片',        // 历史兼容（工具已改名 read）
     ask_user_question: '❓ 需要你确认',
+    quiz_user: '📝 出题考你',
 };
 function showToolHint(msgEl, ev) {
     try {
@@ -1708,7 +1687,8 @@ function showToolHint(msgEl, ev) {
     } catch (e) { /* 提示失败不影响主流程 */ }
 }
 
-// ===== ask 工具（ask_user_question）：AI 需要用户拍板时弹出的问答卡片 =====
+// ===== 交互工具（ask_user_question 要用户拍板 / quiz_user 出题考用户）=====
+// 两个工具共用同一套卡片与提交机制，只有文案和配色不同（kind: 'ask' | 'quiz'）
 // 提问文本遵守公式铁律，这里同样走 renderMath 渲染 $...$ / $$...$$
 function askQuestionsHtml(questions) {
     return (questions || []).map(q => `
@@ -1723,13 +1703,51 @@ function askQuestionsHtml(questions) {
         </div>`).join('');
 }
 
-function renderAskCard(msgEl, ask) {
+// ===== ask/quiz 卡片的「图片作答」=====
+// 整张卡片共用一组图（学生拍一张纸答多道题时最省事，与模型约定一致）。
+// 图片随提交一起作为 multipart 字段发出，后端内联进 tool 结果，模型本轮直接看到。
+function addAskImages(card, files) {
+    if (!files || !files.length) return;
+    card._askImages = card._askImages || [];
+    for (const file of files) {
+        if (!file.type || !file.type.startsWith('image/')) continue;
+        if (file.size > 10 * 1024 * 1024) { addSystemMessage('⚠️ 单张图片最大 10MB'); continue; }
+        if (card._askImages.length >= MAX_IMAGES) {
+            addSystemMessage(`⚠️ 一次最多 ${MAX_IMAGES} 张图片`); break;
+        }
+        const reader = new FileReader();
+        reader.onload = ev => {
+            card._askImages.push({ dataUrl: ev.target.result, file });
+            renderAskImages(card);
+        };
+        reader.readAsDataURL(file);
+    }
+}
+
+function renderAskImages(card) {
+    const list = card.querySelector('.ask-img-list');
+    if (!list) return;
+    const imgs = card._askImages || [];
+    list.innerHTML = imgs.map((img, i) => `
+        <span class="ask-img-thumb">
+            <img src="${img.dataUrl}" alt="作答图片${i + 1}">
+            <button type="button" class="ask-img-del" data-i="${i}" aria-label="移除图片${i + 1}">✕</button>
+        </span>`).join('');
+    list.querySelectorAll('.ask-img-del').forEach(btn =>
+        btn.addEventListener('click', () => {
+            card._askImages.splice(Number(btn.dataset.i), 1);
+            renderAskImages(card);
+        }));
+}
+
+function renderAskCard(msgEl, ask, kind) {
     const questions = ask.questions || [];
     if (!questions.length) return;
+    const isQuiz = kind === 'quiz';   // 出题考用户：按钮/提示/配色走练习版
     const group = 'askg_' + Math.random().toString(36).slice(2, 8);
     const card = document.createElement('div');
-    card.className = 'ask-card';
-    card.innerHTML = questions.map((q, qi) => {
+    card.className = 'ask-card' + (isQuiz ? ' quiz-card' : '');
+    card.innerHTML = (isQuiz ? '<div class="ask-kind">📝 练习</div>' : '') + questions.map((q, qi) => {
         const options = q.options || [];
         const inputType = q.multi_select ? 'checkbox' : 'radio';
         return `
@@ -1748,12 +1766,24 @@ function renderAskCard(msgEl, ask) {
                    placeholder="${options.length ? '也可以自己写答案…' : '输入你的回答…'}">
         </div>`;
     }).join('') + `
+        <div class="ask-attach">
+            <button type="button" class="ask-img-btn">${isQuiz ? '📷 上传解答照片' : '📷 上传图片回答'}</button>
+            <span class="ask-img-hint">可选，最多 ${MAX_IMAGES} 张（整张卡片共用）</span>
+            <input type="file" class="ask-img-input" accept="image/*" multiple hidden>
+            <div class="ask-img-list"></div>
+        </div>
         <div class="ask-foot">
-            <button type="button" class="ask-submit">提交</button>
-            <span class="ask-hint">回答后 AI 接着往下讲</span>
+            <button type="button" class="ask-submit">${isQuiz ? '提交答案' : '提交'}</button>
+            <span class="ask-hint">${isQuiz ? '提交后 AI 批改并接着讲' : '回答后 AI 接着往下讲'}</span>
         </div>`;
     card.querySelector('.ask-submit').addEventListener('click', () => submitAskCard(card, ask));
+    card._askImages = [];
+    const imgInput = card.querySelector('.ask-img-input');
+    card.querySelector('.ask-img-btn').addEventListener('click', () => imgInput.click());
+    imgInput.addEventListener('change', () => { addAskImages(card, imgInput.files); imgInput.value = ''; });
     msgEl.appendChild(card);
+    abandonLiveAskCard();  // 理论上同时只会有一张待答卡片；出现新的就把上一张置为未作答
+    liveAskCard = card;    // 记录当前活动卡片，用户跳过时由 abandonLiveAskCard 置为未作答
     scrollChat();
 }
 
@@ -1771,19 +1801,27 @@ function submitAskCard(card, ask) {
         if (custom) item.custom = custom;
         answers.push(item);
     });
-    if (!answers.length) { addSystemMessage('⚠️ 请先选择或填写一个回答'); return; }
+    if (!answers.length && !(card._askImages || []).length) {
+        addSystemMessage('⚠️ 请先选择、填写，或上传解答图片'); return;
+    }
+    const askImgs = (card._askImages || []).slice();
     // 卡片转为已提交态：禁用输入 + 回显用户的选择（历史里同样能看到）
     card.classList.add('submitted');
     card.querySelectorAll('input, button').forEach(el => { el.disabled = true; });
+    const imgHint = card.querySelector('.ask-img-hint');
+    if (imgHint) imgHint.textContent = '';
     const echo = document.createElement('div');
     echo.className = 'ask-echo';
-    echo.textContent = '✅ ' + answers.map(a => {
+    const echoText = answers.map(a => {
         const parts = [...(a.selected || [])];
         if (a.custom) parts.push(a.custom);
         return parts.join('、');
     }).join('；');
+    echo.textContent = '✅ ' + [echoText, askImgs.length ? `📷 ${askImgs.length} 张作答图片` : '']
+        .filter(Boolean).join('；');
     card.appendChild(echo);
-    pendingAsk = { tool_call_id: ask.tool_call_id, answers: answers };
+    if (liveAskCard === card) liveAskCard = null;  // 已作答，不再是待答卡片
+    pendingAsk = { tool_call_id: ask.tool_call_id, answers: answers, images: askImgs };
     sendMessage();
 }
 // 思维链块：点击标题行展开/折叠（流式与新历史消息共用）
@@ -1799,7 +1837,7 @@ function showTyping() { const id=++typingCount;
     document.getElementById('chatMessages').insertAdjacentHTML('beforeend', `<div class="message assistant" id="typing-${id}"><div class="msg-content"><div class="typing-indicator"><span></span><span></span><span></span></div></div></div>`);
     scrollChat(true); return id; }
 function removeTyping(id) { const e=document.getElementById(`typing-${id}`); if(e) e.remove(); }
-function clearChat() { document.getElementById('chatMessages').innerHTML=''; }
+function clearChat() { document.getElementById('chatMessages').innerHTML=''; liveAskCard = null; }
 // ===== 聊天滚动策略 =====
 // 流式输出（思考链 / 正文）期间不做任何自动滚动，用户可自由上翻阅读，不被打断；
 // 只有「发送消息 / 切换会话 / 加载历史」等主动操作才强制滚到底。
@@ -1894,22 +1932,33 @@ function initConvResizer() {
     const r = document.getElementById('convSidebarResizer');
     const sb = document.getElementById('conversationSidebar');
     if (!r || !sb) return;
-    let dragging = false, startX = 0, startW = 0;
-    r.addEventListener('mousedown', e => {
-        dragging = true; startX = e.clientX; startW = sb.offsetWidth;
-        document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
-        r.classList.add('dragging'); e.preventDefault();
+    // 与三栏分隔条一致走 Pointer Events：平板上手指也能拖“我的对话”宽度
+    let dragging = false, pointerId = null, startX = 0, startW = 0;
+    r.addEventListener('pointerdown', e => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        dragging = true; pointerId = e.pointerId; startX = e.clientX; startW = sb.offsetWidth;
+        document.body.classList.add('col-resizing'); document.body.style.userSelect = 'none';
+        r.classList.add('dragging');
+        try { r.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
     });
-    document.addEventListener('mousemove', e => {
+    document.addEventListener('pointermove', e => {
         if (!dragging) return;
+        if (pointerId !== null && e.pointerId !== pointerId) return;
         let w = startW + (e.clientX - startX);
         w = Math.max(140, Math.min(380, w));
         sb.style.width = w + 'px';
         try { localStorage.setItem(convSbWKey, w); } catch(x){}
     });
-    document.addEventListener('mouseup', () => {
-        if (dragging) { dragging = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; r.classList.remove('dragging'); }
-    });
+    function endDrag(e) {
+        if (!dragging) return;
+        if (pointerId !== null && e.pointerId !== undefined && e.pointerId !== pointerId) return;
+        dragging = false; pointerId = null;
+        document.body.classList.remove('col-resizing'); document.body.style.userSelect = '';
+        r.classList.remove('dragging');
+    }
+    document.addEventListener('pointerup', endDrag);
+    document.addEventListener('pointercancel', endDrag);
 }
 function restoreConvSidebarState() {
     try {
@@ -1921,7 +1970,7 @@ function restoreConvSidebarState() {
 
 async function newConversation() {
     try {
-        const resp = await apiFetch(`/api/chat/conversations?subject=${state.subject}&mode=${state.mode}`, {method:'POST'});
+        const resp = await apiFetch(`/api/chat/conversations?subject=${state.subject}&mode=${state.mode}${(window.FSState && window.FSState.currentFileId()) ? '&file_id=' + window.FSState.currentFileId() : ''}`, {method:'POST'});
         if (!resp.ok) throw new Error('创建失败');
         const d = await resp.json();
         state.conversationId = d.conversation_id;
@@ -1957,29 +2006,47 @@ async function selectConversation(convId) {
                 ? `<div class="quote-bubble">📎 引用：${escHtml(msg.quote)}</div>` : '';
             if (msg.role === 'user') {
                 const imgsHtml = (msg.images && msg.images.length)
-                    ? msg.images.map(src => `<img src="${src}" class="chat-img">`).join('') : '';
+                    ? msg.images.map(src => `<img src="${chatImgSrc(src)}" class="chat-img">`).join('') : '';
                 html += `<div class="message user">${qBlock}<div class="msg-content">${imgsHtml}${escHtml(msg.content)}</div><div class="msg-time">${time()}</div></div>`;
             } else if (msg.role === 'tool') {
-                // ask 工具的回答：历史里回显用户当时的作答
+                // ask/quiz 工具的回答：历史里回显用户当时的作答（文字、图片或两者都有）
                 const txt = (msg.answers || []).map(a => {
                     const parts = [...(a.selected || [])];
                     if (a.custom) parts.push(a.custom);
                     return parts.join('、');
                 }).filter(Boolean).join('；');
-                if (txt) html += `<div class="message user ask-answer"><div class="msg-content">✅ ${escHtml(txt)}</div><div class="msg-time">${time()}</div></div>`;
+                const ansImgs = (msg.images || []).filter(Boolean)
+                    .map(src => `<img src="${chatImgSrc(src)}" class="chat-img">`).join('');
+                if (txt || ansImgs) {
+                    const head = txt ? `✅ ${escHtml(txt)}` : '✅ 图片作答';
+                    html += `<div class="message user ask-answer"><div class="msg-content">${ansImgs}${head}</div><div class="msg-time">${time()}</div></div>`;
+                }
             } else if (msg.role === 'assistant') {
                 const hasText = (msg.content || '').trim();
                 const hasReason = (msg.reasoning || '').trim();
                 const hasAsk = !!(msg.ask_questions && msg.ask_questions.length);
-                // 纯工具调用轮（模型只调了 read_image/modlens 还没说话）：不渲染空气泡
+                // 纯工具调用轮（模型只调了 read 还没说话）：不渲染空气泡
                 if (!hasText && !hasReason && !hasAsk) continue;
                 // 历史消息带思维链时显示折叠的思考块（点击可展开）
                 const rBlock = hasReason
                     ? `<div class="reasoning-block collapsed"><div class="reasoning-header" onclick="toggleReasoning(this)"><span class="reasoning-arrow">▶</span><span class="reasoning-title">🧠 已深度思考（点击展开）</span></div><div class="reasoning-body">${escHtml(msg.reasoning)}</div></div>`
                     : '';
-                // 当时调用过 ask 工具：把问题以只读卡片形式一并还原
+                // 当时调用过 ask/quiz 工具：把问题以只读卡片形式一并还原；
+                // 「已作答」与「当时未作答、直接继续」用不同样式/文案区分（老数据无 ask_answered 字段，按已作答处理）
+                const isQuizCard = msg.ask_kind === 'quiz';
+                const quizTag = isQuizCard ? '<div class="ask-kind">📝 练习</div>' : '';
+                const askAnswered = msg.ask_answered !== false;
+                const askImgNote = msg.ask_images
+                    ? `<div class="ask-foot"><span class="ask-hint">📷 含 ${msg.ask_images} 张图片作答</span></div>`
+                    : '';
                 const askBlock = hasAsk
-                    ? `<div class="ask-card submitted readonly">${askQuestionsHtml(msg.ask_questions)}</div>` : '';
+                    ? (askAnswered
+                        ? `<div class="ask-card submitted readonly${isQuizCard ? ' quiz-card' : ''}">`
+                          + quizTag + askQuestionsHtml(msg.ask_questions) + askImgNote + '</div>'
+                        : `<div class="ask-card unanswered readonly${isQuizCard ? ' quiz-card' : ''}">`
+                          + quizTag + askQuestionsHtml(msg.ask_questions)
+                          + '<div class="ask-foot"><span class="ask-hint">未作答，已直接继续</span></div></div>')
+                    : '';
                 html += `<div class="message assistant">${rBlock}<div class="msg-content">${renderMath(escHtml(msg.content))}</div>${askBlock}<div class="msg-time">${time()}</div></div>`;
             }
         }
@@ -2294,7 +2361,6 @@ document.getElementById('dialogModal').addEventListener('keydown', (e) => {
 // ===== 设置页一键填充常用服务 =====
 const API_PRESETS = {
     main:   { base_url: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash' },
-    vision: { base_url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4v-flash' },
     asr:    { base_url: 'https://dashscope.aliyuncs.com', model: 'qwen3-asr-flash' },
 };
 
@@ -2302,7 +2368,6 @@ function applyPreset(section) {
     const p = API_PRESETS[section];
     const ids = {
         main:   { base: 'setMainBaseUrl', model: 'setMainModel' },
-        vision: { base: 'setVisionBaseUrl', model: 'setVisionModel' },
         asr:    { base: 'setAsrBaseUrl', model: 'setAsrModel' },
     };
     const m = ids[section];
@@ -2328,7 +2393,7 @@ function showSettings() {
     const tokenEl = document.getElementById('setToken');
     if (tokenEl) tokenEl.value = getApiToken();
     // 清空 Key 输入框（留空 = 保留已有 Key），加载当前配置填充
-    ['setMainKey', 'setVisionKey', 'setAsrKey', 'setAsrKeyZhipu', 'setAsrTencentSecretKey', 'setAsrKeySiliconflow'].forEach(id => {
+    ['setMainKey', 'setAsrKey', 'setAsrKeyZhipu', 'setAsrTencentSecretKey', 'setAsrKeySiliconflow'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.value = '';
     });
@@ -2360,13 +2425,6 @@ async function loadModelConfig() {
         ph('setMainKey', c.main && c.main.has_key);
         if (c.main && !c.main.has_key) document.getElementById('setMainKey').placeholder = '尚未配置 Key';
 
-        fill('setVisionName', c.vision && c.vision.name);
-        fill('setVisionBaseUrl', c.vision && c.vision.base_url);
-        fill('setVisionModel', c.vision && c.vision.model);
-        const ve = document.getElementById('setVisionEnabled');
-        if (ve) ve.checked = !!(c.vision && c.vision.enabled);
-        if (c.vision && !c.vision.has_key) document.getElementById('setVisionKey').placeholder = '尚未配置 Key';
-
         fill('setAsrName', c.asr && c.asr.name);
         fill('setAsrBaseUrl', c.asr && c.asr.base_url);
         fill('setAsrModel', c.asr && c.asr.model);
@@ -2397,8 +2455,6 @@ async function loadModelConfig() {
 async function fetchModels(section) {
     const ids = section === 'main'
         ? { base: 'setMainBaseUrl', key: 'setMainKey', model: 'setMainModel', list: 'mainModelList' }
-        : section === 'vision'
-        ? { base: 'setVisionBaseUrl', key: 'setVisionKey', model: 'setVisionModel', list: 'visionModelList' }
         : { base: 'setAsrBaseUrl', key: 'setAsrKey', model: 'setAsrModel', list: 'asrModelList' };
     const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
     const baseUrl = val(ids.base);
@@ -2436,7 +2492,6 @@ async function fetchModels(section) {
 // ===== 提供商分组头：名字 + 配置摘要（加名字要能管理：名字输入实时更新头部） =====
 function refreshProvHead(section) {
     const idMap = { main: ['setMainName', 'pgNameMain', 'pgSumMain'],
-                    vision: ['setVisionName', 'pgNameVision', 'pgSumVision'],
                     asr: ['setAsrName', 'pgNameAsr', 'pgSumAsr'] };
     const [nameId, nameElId, sumElId] = idMap[section] || [];
     const nb = document.getElementById(nameElId);
@@ -2446,9 +2501,9 @@ function refreshProvHead(section) {
     const name = (input && input.value.trim()) || '未命名';
     nb.textContent = name;
     // 摘要：地址 + 模型 + Key 状态（读已填充的输入框）
-    const baseId = section === 'main' ? 'setMainBaseUrl' : section === 'vision' ? 'setVisionBaseUrl' : 'setAsrBaseUrl';
-    const modelId = section === 'main' ? 'setMainModel' : section === 'vision' ? 'setVisionModel' : 'setAsrModel';
-    const keyId = section === 'main' ? 'setMainKey' : section === 'vision' ? 'setVisionKey' : 'setAsrKey';
+    const baseId = section === 'main' ? 'setMainBaseUrl' : 'setAsrBaseUrl';
+    const modelId = section === 'main' ? 'setMainModel' : 'setAsrModel';
+    const keyId = section === 'main' ? 'setMainKey' : 'setAsrKey';
     const g = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
     const parts = [g(baseId), g(modelId)];
     const keyEl = document.getElementById(keyId);
@@ -2457,8 +2512,8 @@ function refreshProvHead(section) {
     ns.textContent = [parts.filter(Boolean).join(' ・ '), keyEl ? (hasKey ? 'Key ✔' : '无 Key') : ''].filter(Boolean).join(' ・ ') || '（未配置）';
 }
 // name 输入即改即存预览（保存走 saveSettings）
-['main', 'vision', 'asr'].forEach(s => {
-    const id = { main: 'setMainName', vision: 'setVisionName', asr: 'setAsrName' }[s];
+['main', 'asr'].forEach(s => {
+    const id = { main: 'setMainName', asr: 'setAsrName' }[s];
     const el = document.getElementById(id);
     if (el) el.addEventListener('input', () => refreshProvHead(s));
 });
@@ -2470,19 +2525,19 @@ function escAttr(s) {
 }
 
 // ===== 分层提供商条目库（每层可多个提供商；模型列表获取即录、勾选启停） =====
-const TIER_ORDER = ['text', 'vision', 'asr'];
-let tiersState = { text: [], vision: [], asr: [] };
+const TIER_ORDER = ['text', 'asr'];
+let tiersState = { text: [], asr: [] };
 
 async function loadTiers() {
     try {
         const resp = await apiFetch('/api/config/tiers');
         const d = await resp.json().catch(() => ({}));
-        tiersState = (d.tiers && d.tiers.text != null) ? d.tiers : { text: [], vision: [], asr: [] };
-    } catch (e) { tiersState = { text: [], vision: [], asr: [] }; }
+        tiersState = (d.tiers && d.tiers.text != null) ? d.tiers : { text: [], asr: [] };
+    } catch (e) { tiersState = { text: [], asr: [] }; }
     TIER_ORDER.forEach(renderTier);
 }
 
-function tierBoxId(tier) { return 'tierItems' + (tier === 'text' ? 'Text' : tier === 'vision' ? 'Vision' : 'Asr'); }
+function tierBoxId(tier) { return 'tierItems' + (tier === 'text' ? 'Text' : 'Asr'); }
 
 function renderTier(tier) {
     const box = document.getElementById(tierBoxId(tier));
@@ -2531,7 +2586,7 @@ function renderTier(tier) {
 }
 
 function refreshTierHead(tier) {
-    const idMap = { text: ['pgNameMain', 'pgSumMain'], vision: ['pgNameVision', 'pgSumVision'], asr: ['pgNameAsr', 'pgSumAsr'] };
+    const idMap = { text: ['pgNameMain', 'pgSumMain'], asr: ['pgNameAsr', 'pgSumAsr'] };
     const nb = document.getElementById(idMap[tier][0]);
     const ns = document.getElementById(idMap[tier][1]);
     if (!nb || !ns) return;
@@ -2675,19 +2730,13 @@ async function saveSettings() {
 
     // 模型配置（服务器，留空 Key = 保留已有）；地址/key/模型取当前生效提供商条目
     const actOf = t => (tiersState[t] || []).find(x => x.active) || (tiersState[t] || [])[0] || {};
-    const mA = actOf('text'), vA = actOf('vision'), aA = actOf('asr');
+    const mA = actOf('text'), aA = actOf('asr');
     const mdl0 = p => ((p.models || [])[0] || '').trim();
     const payload = {
         main: {
             base_url: (mA.base_url || '').trim(),
             api_key: (mA.api_key || '').trim(),
             model: mdl0(mA),
-        },
-        vision: {
-            enabled: document.getElementById('setVisionEnabled') ? document.getElementById('setVisionEnabled').checked : true,
-            base_url: (vA.base_url || '').trim(),
-            api_key: (vA.api_key || '').trim(),
-            model: mdl0(vA),
         },
         asr: {
             base_url: (aA.base_url || '').trim(),
@@ -2992,7 +3041,7 @@ if (window.matchMedia('(max-width: 900px)').matches && window.location.hash) {
     const tip = document.getElementById('vcSeekTip');
     if (!wrapper || !video || !tip) return;
 
-    let startX = null, startY = null, startT = 0, dragging = false, lastSeek = 0;
+    let startX = null, startT = 0, dragging = false, lastSeek = 0;
     let holdTimer = null, boostActive = false, boostBase = 1;
     const PX_PER_SEC = 3.2;   // 每 3.2px ≈ 1 秒
     const TAP_SLOP = 12;      // <12px 视为点击
@@ -3015,7 +3064,7 @@ if (window.matchMedia('(max-width: 900px)').matches && window.location.hash) {
     wrapper.addEventListener('touchstart', e => {
         if (e.target.closest('.speed-btn, .speed-sep, .vc-bar')) return;
         const t = e.touches[0];
-        startX = t.clientX; startY = t.clientY;
+        startX = t.clientX;
         startT = video.currentTime;
         dragging = false;
         endBoost();
@@ -3035,13 +3084,8 @@ if (window.matchMedia('(max-width: 900px)').matches && window.location.hash) {
         if (startX === null) return;
         const t = e.touches[0];
         const dx = t.clientX - startX;
-        const dy = t.clientY - startY;
-        // 方向轴按模式隔离：未旋转/横屏视口 = 左右(x)；旋转横屏（竖屏视口+rotate）视觉左右 = 屏幕Y
-        const rotated = document.documentElement.classList.contains('rotate-landscape') &&
-                        window.matchMedia('(orientation: portrait)').matches;
-        const eff = rotated ? dy : dx;
         if (!dragging) {
-            if (Math.abs(eff) < TAP_SLOP) return;
+            if (Math.abs(dx) < TAP_SLOP) return;
             dragging = true;
             cancelHold();
             endBoost();          // 长按后改为滑动 → 取消 boost 转 seek
@@ -3052,7 +3096,7 @@ if (window.matchMedia('(max-width: 900px)').matches && window.location.hash) {
         lastSeek = now;
         const dur = video.duration;
         if (!(dur > 0)) return;
-        const target = Math.max(0, Math.min(dur, startT + eff / PX_PER_SEC));
+        const target = Math.max(0, Math.min(dur, startT + dx / PX_PER_SEC));
         try { video.currentTime = target; } catch (_) {}
         const delta = target - startT;
         tip.textContent = (delta >= 0 ? '⏩ +' : '⏪ ') + fmt(Math.abs(delta)) + ' ｜ ' + fmt(target) + ' / ' + fmt(dur);
@@ -3069,7 +3113,7 @@ if (window.matchMedia('(max-width: 900px)').matches && window.location.hash) {
             wrapper._suppressClick = true;   // 拖完吞掉 click
         }
         cancelHold();
-        startX = null; startY = null; dragging = false;
+        startX = null; dragging = false;
     }
     wrapper.addEventListener('touchend', endGesture);
     wrapper.addEventListener('touchcancel', endGesture);
@@ -3083,36 +3127,15 @@ if (window.matchMedia('(max-width: 900px)').matches && window.location.hash) {
     }, true);
 })();
 
-// ===== 整站横屏旋转（旋转 + 全屏沉浸，方向感知） =====
-// 进：requestFullscreen 成功后加 rotate-landscape（竖屏视口转 90° / 横屏视口不转，避免 180°）
-//     浏览器不支持全屏时降级为纯旋转（保持可用）
-// 退：再次点击、系统退出全屏（Esc/手势）时同步移除旋转态
-function toggleRotateLandscape() {
-    const root = document.documentElement;
-    // 旋转与全屏互斥：已全屏时先退出（避免两套状态叠加打架）
-    if (document.fullscreenElement || document.webkitFullscreenElement) {
-        if (document.exitFullscreen) document.exitFullscreen();
-        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-    }
-    root.classList.toggle('rotate-landscape');
+// ===== 全屏状态变化 =====
+// 全屏时控制条默认隐藏（见 CSS #videoWrapper:fullscreen .video-controls-overlay），
+// 进全屏后先亮一次，避免用户以为按钮没了。
+function onFullscreenChange() {
+    const el = document.fullscreenElement || document.webkitFullscreenElement;
+    if (el && window.showControls) window.showControls();
 }
-// 系统退出全屏（Esc / 下滑手势）时同步取消旋转态，避免残留
-if (document.documentElement.addEventListener) {
-    document.addEventListener('fullscreenchange', () => {
-        if (!document.fullscreenElement) {
-            document.documentElement.classList.remove('rotate-landscape');
-        } else if (window.showControls) {
-            window.showControls();
-        }
-    });
-    document.addEventListener('webkitfullscreenchange', () => {
-        if (!document.webkitFullscreenElement) {
-            document.documentElement.classList.remove('rotate-landscape');
-        } else if (window.showControls) {
-            window.showControls();
-        }
-    });
-}
+document.addEventListener('fullscreenchange', onFullscreenChange);
+document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 function formatSize(b) { if(!b) return ''; const u=['B','KB','MB','GB']; let s=b,i=0; while(s>=1024&&i<u.length-1){s/=1024;i++} return `${s.toFixed(1)}${u[i]}`; }
 function time() { const n=new Date(); return `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`; }
 
@@ -3304,3 +3327,12 @@ try {
         });
     }
 } catch (e) {}
+
+
+// ===== 设置弹窗 Tab 切换（分页减少滚动长度） =====
+function switchSettingsTab(paneId, btn) {
+    document.querySelectorAll('#settingsModal .settings-tab').forEach(t =>
+        t.classList.toggle('active', t === btn));
+    document.querySelectorAll('#settingsModal .settings-pane').forEach(p =>
+        p.style.display = (p.id === paneId) ? '' : 'none');
+}

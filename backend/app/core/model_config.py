@@ -3,7 +3,6 @@
 结构：
 {
   "main":   {"base_url", "api_key", "model"},
-  "vision": {"enabled", "base_url", "api_key", "model"},
   "asr":    {"base_url", "api_key", "model", "provider", "size", "voice_provider",
              "engines": {"qwen": {"api_key"}, "zhipu": {"api_key"},
                          "tencent": {"app_id","secret_id","secret_key"},
@@ -11,6 +10,8 @@
 }
 存储于 platform_config 表（key="model_config"）。
 asr 顶层 base_url/api_key/model 兼容旧配置（属于千问），已自动迁移进 engines.qwen。
+"vision"（视觉辅助模型）已废弃：主模型本身多模态，看图走图片直接内联 + read 工具，
+旧配置里的该小节会在载入时忽略（不再出现在生效配置里）。
 """
 import json
 import datetime
@@ -35,21 +36,15 @@ def _default_config() -> dict:
     return {
         # 分层提供商条目库（每层可多个提供商，active 标记当前生效）：
         #   tiers[tier] = [{id, name, base_url, api_key, models:[...], enabled:{model:bool}, active:bool}]
-        # 首次访问由 get_tiers 自动从 main/vision/asr 收集为"未命名"条目
-        "tiers": {"text": [], "vision": [], "asr": []},
-        # 三个用途槽位（文本/视觉/语音）各配一个提供商的名称，默认"未命名"
+        # 首次访问由 get_tiers 自动从 main/asr 收集为“未命名”条目
+        # （vision 层已随视觉辅助一起删除；旧库里残留的 vision 键会被忽略）
+        "tiers": {"text": [], "asr": []},
+        # 两个用途槽位（文本/语音）各配一个提供商的名称，默认“未命名”
         "main": {
             "name": "未命名",
             "base_url": "https://api.deepseek.com/v1",
             "api_key": settings.deepseek_api_key or "",
             "model": "deepseek-v4-flash",
-        },
-        "vision": {
-            "name": "未命名",
-            "enabled": True,
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
-            "api_key": settings.zhipu_api_key or "",
-            "model": "glm-4v-flash",
         },
         "asr": {
             "name": "未命名",   # 语音识别提供商名字
@@ -113,6 +108,13 @@ def load_model_config() -> dict:
     finally:
         db.close()
     cfg = _deep_merge(_default_config(), saved)
+    # 清理已废弃的「视觉辅助」配置（旧库里可能还存着 vision 小节与 tiers.vision）：
+    # 主模型已多模态，视觉辅助整套已删，留着也不读——从生效配置里去掉，
+    # 免得设置页/接口回显出一堆无意义的旧值。
+    cfg.pop("vision", None)
+    _tiers = cfg.get("tiers")
+    if isinstance(_tiers, dict):
+        _tiers.pop("vision", None)
     # 迁移：旧版配置里 asr.api_key/base_url/model 属于千问，挪进 engines.qwen
     asr = cfg.get("asr") or {}
     eng = asr.get("engines") or {}
@@ -133,7 +135,7 @@ def save_model_config(cfg: dict) -> dict:
     """保存模型配置：api_key 传空字符串表示"不修改原 key"；返回合并后的完整配置"""
     current = load_model_config()
     # 保留旧 key：前端不回传明文，空 key 时不覆盖
-    for section, fields in (("main", ("api_key",)), ("vision", ("api_key",)), ("asr", ("api_key",))):
+    for section, fields in (("main", ("api_key",)), ("asr", ("api_key",))):
         if section in cfg and isinstance(cfg[section], dict):
             if not cfg[section].get("api_key"):
                 cfg[section]["api_key"] = current.get(section, {}).get("api_key", "")
@@ -151,7 +153,9 @@ def save_model_config(cfg: dict) -> dict:
                         v[fk] = base.get(fk, "")
     # tiers（分层提供商条目库）是整体替换语义：先替换再合并（支持删除条目）
     if "tiers" in cfg:
-        current["tiers"] = cfg.get("tiers") or {}
+        tiers_in = dict(cfg.get("tiers") or {})
+        tiers_in.pop("vision", None)          # 已删的层不允许再写回去
+        current["tiers"] = tiers_in
     merged = _deep_merge(current, cfg)
     db = SessionLocal()
     try:
@@ -193,7 +197,6 @@ def public_view(cfg: dict) -> dict:
     """供 GET /api/config/model 回显：key 只显示掩码 + has_key 标记"""
     out = {}
     for section, fields in (("main", ("name", "base_url", "model")),
-                            ("vision", ("name", "enabled", "base_url", "model")),
                             ("asr", ("name", "base_url", "model", "provider", "size", "voice_provider"))):
         s = cfg.get(section, {})
         item = {f: s.get(f) for f in fields}

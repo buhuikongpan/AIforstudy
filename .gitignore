@@ -6,9 +6,7 @@ data/
 storage/
 
 # ===== 备份 / 排错遗留 =====
-.backup_conv/
-qc
-query
+# 历史备份与排错残留统一归档到 _archive/（规则见文件末尾），此处不再逐条列举
 
 # ===== 本地私有（真实密钥留底，绝不进仓库）=====
 .local_backup/
@@ -20,15 +18,17 @@ scripts/sync_data.py
 scripts/sync_code.py
 scripts/upload_subtitles.py
 scripts/compress_upload.py
-scripts/gen_key_docx.py
-scripts/_test_apply.py
-scripts/fix_db_paths.py
+#（_test_apply / fix_db_paths / gen_key_docx 已归档到 _archive/scripts_local/）
 一键同步代码.bat
 一键同步数据.bat
 一键拉取云端.bat
 一键推送云端.bat
 上传字幕到云端.bat
 视频库压缩上传脚本.bat
+# 本机专用（只管这台机器的 localhost:8000 / cloudflared，换机没意义）
+一键启动服务.bat
+一键关闭服务.bat
+一键重启服务.bat
 
 # ===== Python =====
 __pycache__/
@@ -36,5 +36,10 @@ __pycache__/
 
 # ===== 日志 =====
 *.log
+
 # ===== 归档杂物 =====
 _archive/
+
+# ===== 新增敏感/运维文件（2026-02 追加）=====
+scripts/sync_mirror.py
+一键同步数据（含删除）.bat

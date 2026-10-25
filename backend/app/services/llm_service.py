@@ -1,13 +1,15 @@
 """LLM 服务（本地直连模式）
 - 聊天推理：主模型（默认 DeepSeek，thinking 模式，SSE 流式，可配置任意 OpenAI 兼容端点）
-- 视觉分析：视觉辅助模型（默认智谱 GLM-4V，多模态；主模型多模态时可关闭）
+- 看图：主模型本身就是多模态，图片直接内联进消息（不再有单独的视觉辅助模型）
 """
 import base64
+import asyncio
 import json
+import threading
 from pathlib import Path
 
 import httpx
-from typing import AsyncIterator, Optional, Tuple
+from typing import AsyncIterator, Tuple
 
 from ..core.config import settings
 from ..core.model_config import load_model_config, get_endpoint
@@ -15,6 +17,32 @@ from ..core.paths import to_abs
 
 # 流式整体超时 300s（thinking 模式下一次完整回答可能长达 1-2 分钟）
 STREAM_TIMEOUT = httpx.Timeout(300.0, connect=15.0)
+
+# 总结类 LLM 调用全局串行锁（视频总结 / 文档总结共用，防并发触发云接口限流）
+#
+# 为什么不用 asyncio.Lock：文件中心的产物管线跑在「每个文件一个独立线程 + asyncio.run」
+# 里，各自有独立事件循环。asyncio.Lock 在首次使用时绑定当时的 loop，跨 loop 复用会
+# 直接死锁（实测：第二个文件永远卡在 summarize=running，线程永不返回）。
+# 这里用 threading.Lock 做互斥，把阻塞获取扔到线程池，不阻塞事件循环。
+class CrossLoopLock:
+    """可在多个事件循环 / 线程之间互斥的异步锁"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    async def __aenter__(self):
+        await asyncio.to_thread(self._lock.acquire)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            self._lock.release()
+        except RuntimeError:
+            pass
+        return False
+
+
+SUMMARY_LOCK = CrossLoopLock()
 
 # ===== 思考强度（reasoning_effort）档位 =====
 # 前端提供 low/medium/high/xhigh/max 五档（对齐 Claude 语义）；本平台主模型走 DeepSeek
@@ -69,23 +97,43 @@ SYSTEM_PROMPT = """你是一个考研学习辅导AI助手，正在帮助用户�
 ② 缩小范围 — "注意这里的关键条件是什么？"
 ③ 给半截答案 — "第一步应该先验证...，然后呢？"
 ④ 直接点破 — 只有在用户已经很接近或多次答错时，才给完整答案
-偶尔可以出题考用户来验证 ta 是否真的理解了。
+出题考用户来验证 ta 是否真的理解了 —— 出题时用 quiz_user 出卡片（见下方「交互工具」），用户在卡片上作答后你批改；针对知识点的引导式追问（①~③）仍然直接用正文问。
 
 ### 模式C - 课后问答
 详细、系统地回答用户的问题。
 
-## 提问工具 ask_user_question（只在必须用户拍板时用）
-当且仅当缺少只有用户能提供的信息、或必须由用户做选择才能继续时，调用 ask_user_question 工具提问；能从上下文、字幕或历史里推断出来的一律不要问。
-- 一次问 1~3 个问题，每个问题给稳定 id；能列选项就给选项（推荐项放第一条，标签末尾加 "(Recommended)"）
-- 问题文本尽量短；其中若有数学公式，同样遵守上方公式铁律（$...$ / $$...$$），禁止 \(...\)
-- 模式B 的引导式追问是教学内容，直接用正文提问，不要用这个工具
-- 用户回答后接着正常作答，不要复述一遍用户的回答
+## 交互工具（要用户输入用 ask_user_question；出题考用户用 quiz_user；其余一律正文问）
 
-## 看图工具（消息里出现图片路径时必须用）
-用户上传的图片不会自动送进上下文，只在消息末尾给出本地路径。要看到图片内容必须调用工具：
-- read_image(path)：把图片本身返回给你 —— 你能直接看图时用它
-- modlens_read_image(path)：通过视觉模型把图片转成结构化文字（逐字转录 + 版面 + 语义）—— 你看不到图片时用它
-凡是消息里出现图片路径，先用工具看清图片内容再回答，不要凭空猜测图里有什么；用户配图提问时优先结合图片和字幕/上下文一起回答。
+**ask_user_question —— 缺信息或需要用户拍板时用**（命中任意一条就调用，别在正文里问）：
+1. 缺少只有用户能提供的信息：题干/图片/草稿没发过来、目标院校、基础水平、每天可用时间
+2. 需要用户拍板才能继续：先讲哪一道、用哪种解法、往哪个方向复习
+3. 用户要求改变交互方式（如"直接告诉我答案""别问了""换个方式讲"）——继续引导还是照办由用户选，不要自己顶回去
+4. 同一句话有多种合理读法、且不同读法结果差别大
+自检：正文里出现"请把题目发我""麻烦你把…发过来"这类索要信息的句子，就是该调用工具的信号。
+
+**quiz_user —— 出题考用户时用（模式B 重点，模式A 用户要也照做）**：把练习题做成卡片让用户作答，提交后你拿到他的答案，接着批改。
+- 触发词："出几道题""考考我""测试一下我""来点练习""我要练手""出题" —— 一律用 quiz_user，哪怕在模式A
+- 题干写进 question；选项写进 options（label 写完整内容，不要加 "A/B/C/D" 前缀）
+- 选择题/判断题：选项就是答案（别把正确项标出来），用户点选即可；需要说明的选项用 description 一句话讲清
+- 计算题/证明题：不要 options，题干写 question，用户在卡片输入框里写答案
+- 单选不写 multi_select；多选写 "multi_select": true
+- 一次 1~3 题；想逐题作答、逐题批改就一次 1 题（推荐）
+- 别反问范围：先拿当前视频内容（字幕/上下文）出题；模式B 出与当前考点同源、换数换条件的变式题最合适。只有上下文真的空（无字幕且用户也没说范围）才值得先问一句
+- 用户提交后：直接判对错 + 讲清为什么（对的为什么对、错的错在哪），再出下一题或按用户要求继续
+- 卡片不渲染 Markdown（** 会原样显示），题干与选项只用纯文本 + $...$ 公式
+
+**判据（三选一，别混）**：用户**要提交一次作答、你要判对错**（含一切"出题/考考我"）→ quiz_user；用户**要提供材料或拍板** → ask_user_question；你**只是想让对话往前走一句**（追问、提示方向、缩小范围，如"你再想想这个条件是什么？"）→ 直接用正文问，不调用任何工具。
+**出题一律 quiz_user，绝不用 ask_user_question**：ask 的卡片是"请你确认 / 请你提供信息"，不是练习；反过来，需要用户拍板时也别用 quiz_user。
+能从字幕/历史/图片推断出来的一律自己推断，不要问。
+两个工具的共同格式：一次 1~3 个问题，各给稳定 id；选择类问题能列选项就列，推荐项放第一条并在标签末尾加 "(Recommended)"；文本尽量短，公式遵守上方铁律（$...$ / $$...$$），禁止 \(...\)；用户作答后接着正常作答，不要复述他的回答。
+
+## read 工具（要主动看文件时用）
+用户上传的图片**已经直接附在消息里**，你当轮就能看到，不需要也不应该为此调用工具。
+需要主动查看工作区里的其它文件时，用 read：
+- read(path)：图片（jpg/jpeg/png/webp/gif/bmp）返回图片本身，你能直接看；文本文件（txt/md/srt/json/py/csv 等）返回文字内容
+- 典型用法：回头看历史里提到过的图片、读字幕文件（storage/subtitles/…）、读课程总结（storage/summaries/…）、查看代码或数据文件
+- path 写相对项目根的路径（如 storage/uploads/20261015_174805_845ddf84.jpg），项目的绝对路径也认
+- 不要凭猜测描述文件内容：读不到、不存在或格式不支持时会返回错误说明，如实转述给用户即可
 
 ## 输出纪律（必须遵守）
 1. 禁止输出任何思考过程、内心独白、自我怀疑或自我纠正。永远不要出现"等等""让我想想""我绕晕了""抱歉""重新来""好吧，直接"这类表达——你的所有推理都在内部完成，用户只看到最终答案。
@@ -101,9 +149,10 @@ SYSTEM_PROMPT = """你是一个考研学习辅导AI助手，正在帮助用户�
 5. 语言自然清晰即可"""
 
 
-# ===== ask 工具（照抄 dsh 的 ask_user_question：需要用户拍板时暂停提问）=====
+# ===== ask 工具（照抄 dsh 的 ask_user_question：缺信息/要用户拍板时暂停提问）=====
 # schema 与 description 原文来自 @deepseek-ai/dsh-tool-ask-user 的 ask_user_question；
 # 只把 dsh 内部 schema 的 required 标记转成 OpenAI function calling 的标准写法。
+# 职责单一：要用户提供信息或拍板。出题考用户走下面的 QUIZ_TOOL。
 # questions[].question 等文本由模型生成，因此同样受上方公式铁律约束（后端还会硬清洗）。
 ASK_TOOL = {
     "type": "function",
@@ -164,28 +213,56 @@ ASK_TOOL = {
         },
     },
 }
-# ===== 看图工具（描述原文照抄 dsh 的 read_image / modlens_read_image）=====
-# 分工与 dsh 一致：模型自己能看图用 read_image（工具把图片本身交回去）；
-# 模型看不到图时用 modlens_read_image（本平台用视觉辅助模型 GLM-4V 转结构化文字）。
-READ_IMAGE_TOOL = {
+
+
+# ===== 出题工具 quiz_user（本项目自建，dsh 没有）=====
+# 为什么要单独一个工具：原先"要用户输入"和"出题考用户"挤在同一个 description 里，
+# 模型在模式B 会把"你再想想这个条件是什么？"这类引导式追问也做成选择题卡片，
+# 两种用途互相污染。拆开后：ask 还原成 dsh 原文（职责单一），出题用另一个自解释的名字。
+# schema 直接复用 ASK_TOOL 的（前端本就是同一套卡片渲染，服务端也按 tool_call_id 续轮），
+# 只深拷贝后改几处措辞——省得两份 schema 各自漂移。
+QUIZ_PARAMS = json.loads(json.dumps(ASK_TOOL["function"]["parameters"]))
+QUIZ_PARAMS["description"] = "Quiz questions to present to the user."
+QUIZ_PARAMS["properties"]["questions"]["description"] = \
+    "Practice/quiz questions to present. The user answers by picking options or typing in the card."
+_qp = QUIZ_PARAMS["properties"]["questions"]["items"]["properties"]
+_qp["question"]["description"] = "The practice/quiz question stem (LaTeX formulas allowed)."
+_qp["header"]["description"] = 'Optional short heading, such as "定积分练习".'
+_qp["options"]["description"] = \
+    "Answer choices. Leave empty for open-ended questions (the user types the answer in the card)."
+QUIZ_TOOL = {
     "type": "function",
     "function": {
-        "name": "read_image",
+        "name": "quiz_user",
+        "description": "Present a practice or quiz question to the user and wait for their answer, so you can grade it. For multiple-choice questions put the choices in options; for calculation or proof questions leave options empty and the user types the answer in the card. The user's answer comes back as this tool's result, then you grade it and continue.",
+        "parameters": QUIZ_PARAMS,
+    },
+}
+# ===== read 工具（泛读工作区文件；图片直接交回图块，文本交回文字）=====
+# 取代原先的 read_image / modlens_read_image 双工具：主模型已能看图，不再需要
+# 「用视觉模型把图转成文字」的桥接（视觉辅助整套配置已随之删除）。
+# 只留一个名字（read），模型不必在「我能看图吗」上做判断。
+READ_TEXT_EXTS = {".txt", ".md", ".markdown", ".srt", ".vtt", ".json", ".csv", ".tsv",
+                  ".py", ".js", ".mjs", ".ts", ".html", ".htm", ".css", ".sh", ".bat",
+                  ".yml", ".yaml", ".ini", ".cfg", ".log", ".sql"}
+READ_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read",
         "description": (
-            "Read a PNG/JPEG/WebP/GIF file and return the image itself. A path without a file "
-            "extension is accepted; the format is detected from the file content, so normalized "
-            "attachment paths can be passed directly without copying or renaming. Harness validates "
-            "and downscales large supported images before the next model request, so use this tool "
-            "directly instead of installing image libraries or creating thumbnails merely to inspect "
-            "an image. Independent files may be read concurrently in small batches. Requires the "
-            "current model to accept image input."
+            "Read a file from the study platform workspace. Images (jpg/jpeg/png/webp/gif/bmp) "
+            "are returned as the actual image, so you can look at them directly. Text files "
+            "(txt/md/srt/json/csv/py/js/... ) are returned as text. Use it to look at an uploaded "
+            "image mentioned earlier in the conversation, a subtitle file, a course summary, or a "
+            "source/data file. Pass a path relative to the project root (e.g. "
+            "storage/uploads/20261015_174805_845ddf84.jpg)."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Absolute local file path or http(s) URL of the image",
+                    "description": "File path relative to the project root (or an absolute path inside it)",
                 },
             },
             "required": ["path"],
@@ -193,39 +270,63 @@ READ_IMAGE_TOOL = {
     },
 }
 
-MODLENS_READ_IMAGE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "modlens_read_image",
-        "description": (
-            "Read an image through the modlens vision bridge. Use whenever a message references an "
-            "image the current model cannot see: a local file path or an http(s) URL to a screenshot, "
-            "photo, chart, diagram, or document scan. Returns structured evidence with every word "
-            "transcribed (ocr.full_text), layout regions in reading order, semantics, and an "
-            "uncertainty list. Quote the evidence instead of guessing. For the same image and focus, "
-            "call this tool once and reuse its returned evidence instead of calling again. Requires a "
-            "configured vision model (⚙️ 设置 → 视觉辅助); if none is configured the call fails with "
-            "an error instead of guessing."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Absolute local file path or http(s) URL of the image",
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "Optional extra focus for the reading (e.g. \"focus on the axis labels\")",
-                },
-            },
-            "required": ["path"],
-        },
-    },
-}
-
-TOOLS = [ASK_TOOL, READ_IMAGE_TOOL, MODLENS_READ_IMAGE_TOOL]
+TOOLS = [ASK_TOOL, QUIZ_TOOL, READ_TOOL]
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
+
+
+# ===== 文件中心沙箱工具（会话绑定文件时才挂载，作用域锁死在该文件的产物目录） =====
+# 共识 D5：预编排保下限，沙箱 read 保上限——模型需要细节时自己翻当前文件的产物。
+READ_ARTIFACT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_artifact",
+        "description": (
+            "Read derived content of the file the user is currently studying. Available: "
+            "'summary.md' (AI summary), 'extracted.md' (full extracted text), "
+            "'pages.json' (per-page text). Args: {name: 'summary.md'} or "
+            "{page: 12} to read one page's text. Use when you need details beyond the "
+            "pre-loaded context excerpt."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Artifact file name, e.g. summary.md / extracted.md"},
+                "page": {"type": "integer", "description": "Read a single page's text instead (1-based)"},
+            },
+        },
+    },
+}
+LIST_ARTIFACTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_artifacts",
+        "description": "List what derived content is available for the current file (summary/extracted text/page count, etc.). Call this first if unsure what can be read.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+ARTIFACT_TOOL_NAMES = {"read_artifact", "list_artifacts"}
+
+# 章节摘要懒生成工具（共识 Q11：首次问到该章才生成并缓存）
+GEN_CHAPTER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "gen_chapter_summary",
+        "description": (
+            "Generate (or fetch cached) a detailed study summary for one chapter of the file "
+            "the user is currently studying. Use it when the user's question involves a chapter "
+            "whose detailed summary is not yet in your context (the context explicitly notes which "
+            "chapter lacks one and gives its cid). Args: {cid: 'c5'} — chapter ids appear in the "
+            "outline/TOC section of the context."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cid": {"type": "string", "description": "Chapter id from the outline, e.g. c5"},
+            },
+            "required": ["cid"],
+        },
+    },
+}
 
 
 def _tools_unsupported(body: str) -> bool:
@@ -277,6 +378,7 @@ async def chat_completion_stream(
     model_override: str = "",
     effort: str = "",
     enable_tools: bool = True,
+    extra_tools: list = None,
 ) -> AsyncIterator[Tuple[str, str]]:
     """流式调用主模型（thinking 模式，OpenAI 兼容端点），逐段产出：
 
@@ -302,12 +404,13 @@ async def chat_completion_stream(
 
     # 先带 tools 请求；端点不认（400 且提到 tool/function）则摘掉 tools 重试一次，
     # 保证「模型不支持 function calling」时聊天仍可用，只是没有 ask 卡片。
+    all_tools = list(TOOLS) + list(extra_tools or [])
     attempts = [True, False] if enable_tools else [False]
     async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
         for use_tools in attempts:
             payload = _completion_payload(
                 messages, system_prompt, stream=True, model=model, effort=effort,
-                tools=TOOLS if use_tools else None,
+                tools=all_tools if use_tools else None,
             )
             tool_acc: dict = {}  # index -> {id, name, arguments}（流式分片累积）
             async with client.stream("POST", endpoint, json=payload, headers=headers) as resp:
@@ -455,44 +558,6 @@ async def summarize_lecture(title: str, segments: list) -> str:
     )
 
 
-async def vision_analyze(
-    image_base64: str,
-    question: str = "请详细描述这张图片中的内容",
-) -> Optional[str]:
-    """视觉分析：用视觉辅助模型（默认智谱 GLM-4V）识别图片内容，返回文字描述"""
-    v = load_model_config()["vision"]
-    headers = {
-        "Authorization": f"Bearer {v.get('api_key') or settings.zhipu_api_key}",
-        "Content-Type": "application/json",
-    }
-
-    content_parts = [
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
-        },
-        {"type": "text", "text": question},
-    ]
-
-    payload = {
-        "model": v.get("model") or "glm-4v-flash",
-        "messages": [{"role": "user", "content": content_parts}],
-        "temperature": 0.5,
-        "max_tokens": 512,
-        "stream": False,
-    }
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        try:
-            resp = await client.post(get_endpoint(v.get("base_url"), "/chat/completions"),
-                             json=payload, headers=headers)
-            resp.raise_for_status()
-            result = resp.json()
-            return result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        except Exception as e:
-            return f"[图片分析失败: {str(e)}]"
-
-
 # ===== 工具执行：模型发起工具调用后，服务端在这里落地 =====
 # 上传图片落盘目录（chat.py 写、工具读，两边共用同一个常量）
 UPLOAD_DIR = Path(settings.storage_dir) / "uploads"
@@ -537,31 +602,213 @@ def _b64_data_url(p: Path) -> str:
     return f"data:{mime};base64," + base64.b64encode(p.read_bytes()).decode("utf-8")
 
 
-# modlens 桥接的结构化输出要求（照抄 dsh 描述里的字段：ocr.full_text / layout / semantics / uncertainty）
-MODLENS_PROMPT = """你在为「看不到图片」的模型做视觉桥接：把图片逐字转录并按版面结构化。
-只输出 JSON，不要任何额外说明，格式如下：
-{"ocr": {"full_text": "图中全部文字（公式用 $...$ 行内、$$...$$ 独立行）"},
- "layout": [{"region": "区块位置说明", "text": "该区块内容"}],
- "semantics": "这张图整体在讲什么（题目/笔记/图表/草稿的意图）",
- "uncertainty": ["看不清或无法确定的地方"]}
-要求：文字一个都别漏，公式必须用 $...$ / $$...$$；看不清的写进 uncertainty，绝不猜测。
-每个字段都要填：图中没有文字时 ocr.full_text 写空字符串，但 semantics 必须描述画面里有什么
-（图形/颜色/版式/大致意图）；layout 为空的就写 []。"""
+def upload_image_block(rel_path: str) -> dict:
+    """把已落盘的上传图片转成一条 image_url 内容块。
+
+    供 chat.py 把图片直接内联进消息（用户上传的图 / 学生用图片作答的 tool 结果）；
+    沙箱 / 格式 / 大小校验与 read 工具完全共用 _safe_upload_path，
+    避免两处沙箱规则各写一遍、日后漂移。
+    """
+    p = _safe_upload_path(rel_path)
+    return {"type": "image_url", "image_url": {"url": _b64_data_url(p)}}
 
 
-async def execute_tool_call(name: str, args: dict):
-    """执行一次工具调用，返回 tool 消息的 content（字符串，或带图片的内容数组）"""
-    if name == "read_image":
-        p = _safe_upload_path(args.get("path"))
-        return [
-            {"type": "text", "text": f"图片 {p.name} 的内容如下："},
-            {"type": "image_url", "image_url": {"url": _b64_data_url(p)}},
-        ]
-    if name == "modlens_read_image":
-        p = _safe_upload_path(args.get("path"))
-        focus = str(args.get("prompt") or "").strip()
-        question = MODLENS_PROMPT + (f"\n额外关注点：{focus}" if focus else "")
-        raw = base64.b64encode(p.read_bytes()).decode("utf-8")
-        out = await vision_analyze(raw, question)
-        return out or "（视觉模型没有返回内容）"
+def upload_public_url(rel_path: str) -> str:
+    """把库里的图片相对路径转成前端可直接 <img src> 的接口地址。
+
+    上传目录没有静态挂载（不想把用户作业图暴露成免鉴权静态资源），
+    统一走 /api/chat/uploads/<文件名>：该前缀在鉴权中间件覆盖范围内，
+    前端按既有约定追加 ?token= 即可（与视频流同一套做法）。
+    """
+    name = Path(str(rel_path or "").replace("\\", "/")).name
+    return f"/api/chat/uploads/{name}" if name else ""
+
+
+# ===== read 工具：工作区文件读取（图片给图块、文本给文字）=====
+MAX_READ_BYTES = 10 * 1024 * 1024     # 图片上限，与上传限制一致
+MAX_READ_CHARS = 40000                # 文本单次返回上限（超出截断，附提示）
+# 不给模型读的敏感文件（.env 里是 API Key；库里是用户数据；密钥/证书同理）
+READ_DENY_NAMES = {".env", ".env.local", ".env.production", "id_rsa", "id_ed25519"}
+READ_DENY_SUFFIX = {".pem", ".key", ".p12", ".keystore", ".db", ".sqlite", ".db-wal", ".db-shm"}
+
+
+def _safe_workspace_path(path: str) -> Path:
+    """把模型给的路径限制在**项目根目录内**（read 工具可读工作区任意文件）。
+
+    与上传沙箱的区别：不再限定 storage/uploads，但绝不允许越出项目根
+    （防 ../../ 之类的目录穿越），同时挡掉 .env / 数据库 / 私钥等敏感文件。
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        raise ValueError("path 不能为空")
+    p = Path(raw.replace("\\", "/"))
+    cand = p if p.is_absolute() else to_abs(raw)
+    if cand is None:
+        raise ValueError(f"路径无法解析：{raw}")
+    if not cand.is_file():
+        # 兼容：模型偶尔只回文件名（不带目录），去上传目录里找一下
+        alt = UPLOAD_DIR / p.name
+        if p.name and alt.is_file():
+            cand = alt
+    try:
+        cand = cand.resolve()
+    except Exception:
+        raise ValueError(f"路径无法解析：{raw}")
+    base = Path(settings.storage_dir).resolve().parent   # 项目根
+    if cand != base and base not in cand.parents:
+        raise ValueError("只能读取项目目录内的文件")
+    if not cand.is_file():
+        raise ValueError(f"文件不存在：{raw}")
+    name = cand.name.lower()
+    if name in READ_DENY_NAMES or cand.suffix.lower() in READ_DENY_SUFFIX:
+        raise ValueError(f"该文件不允许读取：{cand.name}")
+    return cand
+
+
+def _read_text_file(p: Path) -> str:
+    """读文本文件（容错编码），超长截断并注明"""
+    size = p.stat().st_size
+    if size > MAX_READ_BYTES:
+        raise ValueError(f"文件太大（{size // 1024}KB），只支持 10MB 以内的文件")
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        raise ValueError(f"读取失败：{e}")
+    if "\x00" in text[:2000]:
+        raise ValueError("这是二进制文件，无法按文本读取")
+    if len(text) > MAX_READ_CHARS:
+        text = text[:MAX_READ_CHARS] + f"\n\n…（内容过长，仅返回前 {MAX_READ_CHARS} 字，共 {len(text)} 字）"
+    return text
+
+
+# ===== 文件中心沙箱：当前文件的产物目录（read_artifact / list_artifacts 用） =====
+def _artifact_sandbox(file_id: int) -> Path:
+    base = (Path(settings.artifacts_dir) / str(int(file_id or 0))).resolve()
+    if base.parent != Path(settings.artifacts_dir).resolve():
+        raise ValueError("非法 file_id")
+    return base
+
+
+def _execute_artifact_tool(name: str, args: dict, file_id: int):
+    """沙箱产物读取：只能访问 storage/artifacts/{file_id}/ 内的白名单产物。
+
+    与工作区 read 的区别：作用域锁死在当前文件的产物目录（共识 D5 的隔离边界）。
+    """
+    from .file_service import ARTIFACT_NAMES, read_artifact
+    base = _artifact_sandbox(file_id)
+    if not base.is_dir():
+        raise ValueError("当前文件还没有任何 AI 产物（可能仍在处理中）")
+    if name == "list_artifacts":
+        items = []
+        meta = {}
+        mp = base / "meta.json"
+        if mp.is_file():
+            try:
+                meta = json.loads(mp.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        for fname in sorted(ARTIFACT_NAMES):
+            p = base / fname
+            if p.is_file():
+                items.append({"name": fname, "size": p.stat().st_size})
+        return json.dumps({"artifacts": items, "meta": meta}, ensure_ascii=False)
+    # read_artifact
+    page = args.get("page")
+    if page:
+        raw = read_artifact(file_id, "pages.json")
+        if not raw:
+            raise ValueError("没有逐页文本（pages.json 不存在）")
+        pages = json.loads(raw)
+        for p in pages:
+            if p.get("page") == int(page):
+                return f"第 {page} 页内容：\n\n{p['text']}"
+        raise ValueError(f"没有第 {page} 页（共 {len(pages)} 页）")
+    fname = str(args.get("name") or "summary.md")
+    if fname not in ARTIFACT_NAMES:
+        raise ValueError(f"未知产物：{fname}（可用：{', '.join(sorted(ARTIFACT_NAMES))}）")
+    text = read_artifact(file_id, fname)
+    if text is None:
+        raise ValueError(f"产物不存在：{fname}")
+    if len(text) > MAX_READ_CHARS:
+        text = text[:MAX_READ_CHARS] + f"\n\n…（内容过长，仅返回前 {MAX_READ_CHARS} 字，共 {len(text)} 字；可用 page 参数逐页读）"
+    return f"{fname} 内容如下：\n\n{text}"
+
+
+async def _gen_chapter_summary_tool(args: dict, file_id: int):
+    """AI 触发的章节摘要懒生成：缓存命中直接回；否则 1 次 LLM 调用并落盘（计入闸门）"""
+    from ..core.database import SessionLocal
+    from ..models import File as FileModel
+    from .doc_index import (get_outline, compose_chapter_prompt,
+                            read_artifact, write_text,
+                            llm_gate_ok, llm_record)
+    cid = str(args.get("cid") or "").strip()
+    if not cid:
+        raise ValueError('需要 cid 参数（章节 id，如 "c5"；见上下文中的目录结构）')
+
+    db = SessionLocal()
+    try:
+        f = db.query(FileModel).filter(FileModel.id == file_id).first()
+        title = f.name if f else f"文件{file_id}"
+    finally:
+        db.close()
+
+    ol = get_outline(file_id)
+    if not ol:
+        raise ValueError("当前文件没有章节大纲")
+    ch = next((c for c in (ol.get("chapters") or []) if c["id"] == cid), None)
+    if not ch:
+        avail = ", ".join(c["id"] + "=" + (c["title"][:14] or "无题")
+                          for c in (ol.get("chapters") or [])[:12])
+        raise ValueError(f"章节 {cid} 不存在。可用章节：{avail}")
+
+    cached = read_artifact(file_id, f"chap_{cid}.md")
+    if cached:
+        return "章节「" + ch["title"] + "」摘要（已有缓存，无需重新生成）：" + chr(10) + chr(10) + cached
+    raw = read_artifact(file_id, "pages.json")
+    if not raw:
+        raise ValueError("该文件还没有逐页文本（提取未完成）")
+    pages = json.loads(raw)
+
+    if not llm_gate_ok(file_id, "chapter"):
+        raise ValueError(
+            f"已达该文档自动生成上限（{MAX_LLM_CALLS_PER_DOC} 次）。"
+            "请告知用户：可在设置里提高上限或手动重试。")
+
+    prompt = compose_chapter_prompt(title, ol, pages, ch)
+    async with SUMMARY_LOCK:
+        content = await chat_completion_simple([{"role": "user", "content": prompt}],
+                                               max_tokens=2500, temperature=0.3)
+    if not (content or "").strip():
+        raise ValueError("生成结果为空")
+    write_text(file_id, f"chap_{cid}.md", content)
+    llm_record(file_id, "chapter", auto=True)
+    return "已生成章节「" + ch["title"] + "」的学习摘要（已缓存，下次直接可用）：" + chr(10) + chr(10) + content
+
+async def execute_tool_call(name: str, args: dict, file_id: int = 0):
+    """执行一次工具调用，返回 tool 消息的 content（字符串，或带图片的内容数组）
+
+    file_id: 会话绑定的当前文件 id（文件中心沙箱工具 read_artifact/list_artifacts 用；
+    传 0 表示会话未绑定文件，这两个工具不会被挂载）。
+    """
+    if name in ARTIFACT_TOOL_NAMES:
+        if not file_id:
+            raise ValueError("当前会话没有绑定文件")
+        return _execute_artifact_tool(name, args, file_id)
+    if name == "gen_chapter_summary":
+        if not file_id:
+            raise ValueError("当前会话没有绑定文件")
+        return await _gen_chapter_summary_tool(args, file_id)
+    # read_image：旧名保留兼容（历史里可能有模型沿用旧工具名发的调用）
+    if name in ("read", "read_image"):
+        p = _safe_workspace_path(args.get("path"))
+        if p.suffix.lower() in IMAGE_EXTS:
+            if p.stat().st_size > MAX_IMAGE_BYTES:
+                raise ValueError("图片超过 10MB 上限")
+            return [
+                {"type": "text", "text": f"图片 {p.name} 的内容如下："},
+                {"type": "image_url", "image_url": {"url": _b64_data_url(p)}},
+            ]
+        if p.suffix.lower() in READ_TEXT_EXTS:
+            return f"文件 {p.name} 的内容如下：\n\n" + _read_text_file(p)
+        raise ValueError(f"不支持的文件类型：{p.suffix or '（无扩展名）'}")
     raise ValueError(f"未知工具：{name}")

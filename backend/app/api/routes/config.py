@@ -20,7 +20,6 @@ def get_config_status():
     tencent = asr_eng.get("tencent") or {}
     return {
         "deepseek": bool(cfg["main"].get("api_key")),
-        "zhipu": bool(cfg["vision"].get("api_key")),
         "qwen": bool((asr_eng.get("qwen") or {}).get("api_key") or cfg["asr"].get("api_key")),
         "zhipu_asr": bool((asr_eng.get("zhipu") or {}).get("api_key")),
         "tencent_asr": bool((tencent.get("secret_id") or "").strip()
@@ -32,14 +31,6 @@ def get_config_status():
 
 class MainModelIn(BaseModel):
     name: str = ""      # 提供商名字（空=保留原）
-    base_url: str = ""
-    api_key: str = ""
-    model: str = ""
-
-
-class VisionModelIn(BaseModel):
-    name: str = ""      # 提供商名字（空=保留原）
-    enabled: bool = True
     base_url: str = ""
     api_key: str = ""
     model: str = ""
@@ -58,7 +49,6 @@ class AsrModelIn(BaseModel):
 
 class ModelConfigIn(BaseModel):
     main: Optional[MainModelIn] = None
-    vision: Optional[VisionModelIn] = None
     asr: Optional[AsrModelIn] = None
 
 
@@ -75,14 +65,12 @@ def post_model_config(data: ModelConfigIn):
     cfg = data.model_dump(exclude_none=True)
     if data.main is None:
         cfg.pop("main", None)
-    if data.vision is None:
-        cfg.pop("vision", None)
     if data.asr is None:
         cfg.pop("asr", None)
     # pydantic 默认空串会覆盖已有配置：把空字段剔除（api_key 空也剔除，交给保留逻辑）。
     # provider/size/voice_provider 必须一起剔除：它们在 AsrModelIn 里默认是空串，
     # 若不剔除，一次只带 provider 的部分提交会把 size / voice_provider 静默清空。
-    for section in ("main", "vision", "asr"):
+    for section in ("main", "asr"):
         sec = cfg.get(section)
         if not isinstance(sec, dict):
             continue
@@ -161,11 +149,12 @@ async def _fetch_models(base_url: str, api_key: str) -> tuple:
 
 
 # ==================== 分层提供商条目库（tiers：每层可多个提供商，模型列表可勾选） ====================
-TIER_MAP = {"text": "main", "vision": "vision", "asr": "asr"}
+TIER_MAP = {"text": "main", "asr": "asr"}
+TIER_NAMES = "/".join(TIER_MAP)
 
 
 def _ensure_tiers(cfg: dict):
-    """tiers 为空时，自动从 main/vision/asr 现有配置收集为初始条目（名字=未命名）"""
+    """tiers 为空时，自动从 main/asr 现有配置收集为初始条目（名字=未命名）"""
     tiers = dict(cfg.get("tiers") or {})
     changed = False
     for tier, section in TIER_MAP.items():
@@ -200,7 +189,7 @@ class TierProviderIn(BaseModel):
 
 
 class TiersSaveIn(BaseModel):
-    tier: str                # text / vision / asr
+    tier: str                # text / asr
     providers: Optional[list[TierProviderIn]] = None
 
 
@@ -211,13 +200,13 @@ class TierActivateIn(BaseModel):
 
 @router.get("/tiers")
 def get_tiers():
-    """三层提供商条目（key 掩码）；首次自动从 main/vision/asr 收集"""
+    """分层提供商条目（key 掩码）；首次自动从 main/asr 收集"""
     cfg = load_model_config()
     tiers, changed = _ensure_tiers(cfg)
     if changed:
         save_model_config({"tiers": tiers})
     out = {}
-    for tier in ("text", "vision", "asr"):
+    for tier in TIER_MAP:
         out[tier] = []
         for p in tiers.get(tier, []):
             out[tier].append({
@@ -237,7 +226,7 @@ def get_tiers():
 def save_tiers(data: TiersSaveIn):
     """保存某一层全部条目（新增/编辑/删除/勾选状态整体提交；key 留空保留）"""
     if data.tier not in TIER_MAP:
-        raise HTTPException(400, "tier 仅支持 text/vision/asr")
+        raise HTTPException(400, f"tier 仅支持 {TIER_NAMES}")
     cfg = load_model_config()
     tiers, _ = _ensure_tiers(cfg)
     cur = {p.get("id"): p for p in tiers.get(data.tier, [])}
@@ -275,9 +264,9 @@ def save_tiers(data: TiersSaveIn):
 
 @router.post("/tiers/activate")
 def activate_tier_provider(data: TierActivateIn):
-    """把某条目设为该层当前生效，并同步 base_url/key/model 到 main/vision/asr"""
+    """把某条目设为该层当前生效，并同步 base_url/key/model 到 main/asr"""
     if data.tier not in TIER_MAP:
-        raise HTTPException(400, "tier 仅支持 text/vision/asr")
+        raise HTTPException(400, f"tier 仅支持 {TIER_NAMES}")
     cfg = load_model_config()
     tiers, _ = _ensure_tiers(cfg)
     lst = tiers.get(data.tier, [])

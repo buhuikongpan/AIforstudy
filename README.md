@@ -173,10 +173,11 @@ python scripts/migrate_paths_after_rename.py --apply   # 备份数据库后写�
 ├── frontend/                  # 前端页面（原生 JS + KaTeX）
 │   ├── index.html
 │   ├── css/  js/  vendor/
-├── scripts/考研学习平台.bat          # 一键启动
-├── docs/                      # 项目文档（Agent 提示词、备忘）
+├── scripts/                   # 独立工具脚本（一键启动.bat / 字幕 / 转码 / 云端同步）
+│   └── _legacy/               # 一次性修复·迁移·排查脚本（留档，不再维护）
 ├── storage/                   # 运行时数据：videos/（视频）subtitles/（字幕）summaries/（课程总结）
 ├── data/                      # SQLite + 日志（运行时数据）
+├── _archive/                  # 历史备份 / 排错残留（已 gitignore）
 ├── .env / .env.example        # API Key + PLATFORM_TOKEN 配置
 ├── .gitignore
 └── README.md
@@ -213,3 +214,90 @@ python -m unittest discover -s tests -v
   相对路径、失效的按文件名找回（详见上文「路径约定」）。想先看体检报告：
   `python scripts/migrate_paths_after_rename.py`
 - **starlette 报错**：确认 `pip install starlette==1.6.0`（fastapi 0.141.1 配套版本）
+---
+
+## 📚 文件中心（全资料 AI 辅助，2026-02 改造）
+
+平台已从"视频中心"升级为"**文件中心**"：几乎所有学习资料（PPT/PDF/Word/图片/文本/音视频）统一上传、统一查看、统一 AI 辅助。
+
+### 三区架构
+
+- **左侧 · 托管资源管理器**：上传复制制（文件拷贝进 `storage/library/`，不碰原始磁盘），
+  支持新建/重命名/移动/删除（回收站）/搜索/拖拽上传/批量删除，操作体验对齐资源管理器。
+- **中间 · 全类型查看器**：PDF 用 pdf.js（本地 vendor）渲染，Office（pptx/docx/xlsx）入库时自动
+  转成 PDF 后同一路径查看，图片/文本/Markdown/音频原生支持，视频沿用原播放器（字幕/倍速/总结全保留）。
+  PDF 支持文本层划词（划词后点"🤖 问 AI"直接提问）与阅读位置记忆。
+- **右侧 · 上下文编排 agent**：上下文跟随当前查看的文件（会话绑定文件）。预编排注入
+  总结/全文摘录/当前查看位置；模型还可用沙箱工具 `read_artifact`/`list_artifacts` 自己翻当前文件的产物
+  （作用域锁死在 `storage/artifacts/{file_id}/`）。聊天面板 🧩 按钮可实时预览实际注入内容，
+  ⚙️ 设置里可按文件类型配置编排模板——编排器不是黑盒。
+
+### 数据与产物
+
+- 统一文件表 `files`（旧 videos 数据已迁移，**id 不变**，字幕/总结/会话引用全部有效）；
+  视频特有字段在 `video_meta`；后台任务在 `file_tasks`。
+- AI 产物集中在 `storage/artifacts/{file_id}/`：`derived.pdf`（Office 转换产物）、
+  `extracted.md`、`summary.md`、`chunks.jsonl`、`pages.json`、`thumb.png`、`meta.json`。
+- 回收站：`storage/library_trash/`，可恢复或彻底删除。
+
+### Office → PDF 转换引擎（外部依赖）
+
+Office 文件入库时需要转换引擎把 pptx/docx/ppt 转成 PDF（保真度高、提取管线统一）：
+
+1. **LibreOffice（当前使用，推荐）**：装完即可用，程序按顺序自动查找
+   —— PATH 里的 `soffice` → `C:/Program Files/LibreOffice/program/soffice.exe`
+   → `Program Files (x86)` → 扫描 `LibreOffice*` 目录。**本机已安装 26.8.1 并验证通过**
+   （55 页 PPT 转 PDF，中文与图片完整还原）。
+   转换时使用独立 profile（`data/_lo_profile`），避免残留进程锁住默认 profile 导致静默失败。
+2. **x2t（可选，保真度更高）**：OnlyOffice 的转换引擎。在 ⚙️ 设置 →「上下文编排 & 文件转换」里填路径
+   （Windows 可用 `FileConverter/bin/x2t.exe`，依赖库与字体索引需在同目录）。配置后优先于 LibreOffice。
+3. 两者都没有：Office 文件可上传、可下载，状态标记为处理失败并提示配置；原文件始终保留。
+
+> 已知失真：字体未安装会被替换；PPT 动画/嵌入音视频不会进 PDF；复杂 SmartArt 偶有差异。
+> 原文件永远保留，查看器留「下载原文件」入口。
+
+### 播放器功能与快捷键
+
+- **黑边自适应**：容器按视频宽高比贴合，不再上下大片黑边
+- **字幕**：字号 `[` `]` 调节、底板浓淡 `◐` `◑` 调节、`S` 或 📄 显示/隐藏（设置持久化到浏览器）
+- **快捷键**（视频窗格可见且未聚焦输入框时生效）：
+
+| 键 | 功能 | 键 | 功能 |
+|---|---|---|---|
+| `空格` / `K` | 播放/暂停 | `←` / `→` | 后退/前进 5 秒 |
+| `J` / `L` | 后退/前进 10 秒 | `↑` / `↓` | 音量 ±10% |
+| `M` | 静音切换 | `F` | 全屏 |
+| `0`–`9` | 跳到 0%–90% | `[` `]` | 字幕字号 ± |
+| `S` | 字幕显示/隐藏 | | |
+
+- **进度记忆**：每 3 秒 + 暂停/拖动/关闭页面时落盘，重新打开自动续播
+- **倍速工具栏**：鼠标移入视频区域时显示（0.5x–5x、全屏、画中画、截图开关）
+
+### 开发自查工具
+
+改完前端想确认效果（不依赖手工点页面）：
+
+```
+scripts\截图UI.bat                     # 截当前界面到 data\ui_shot.png
+node scripts/screenshot_ui.mjs <token> out.png "<页面里执行的 async 表达式>"
+```
+
+第二种用法可带一段在页面里执行的表达式，返回值会打印（`RESULT:`），用来断言 DOM 状态。
+
+> **注意：ES module 子模块的缓存坑**
+> `main.js` 带 `?v=N`，但它内部 `import './tree.js'` 不带版本号 —— 只 bump 入口版本号时，
+> 子模块仍会被浏览器缓存，导致「改了看不到效果」。后端已对 `/js/` `/css/` 下所有文件
+> 返回 `Cache-Control: no-cache, no-store`，改完**普通刷新即生效**。
+
+### 常用接口（/api/fs/*、/api/files/*）
+
+`GET /api/fs/tree`、`POST /api/fs/upload`、`POST /api/fs/mkdir`、`PATCH /api/fs/file/{id}/rename`、
+`POST /api/fs/file/{id}/move`、`DELETE /api/fs/file/{id}`（进回收站）、
+`GET /api/files/{id}/view`（查看流，Office 自动给转换后的 PDF）、
+`GET /api/files/{id}/status`、`GET /api/files/{id}/text?page=N`、
+`GET/POST /api/fs/settings`（编排模板 + x2t 配置）。
+
+### 迁移与维护
+
+- 迁移脚本：`python scripts/migrate_files_center.py`（幂等，可重复执行；`--dry-run` 预览）
+- 开发计划全文：工作区根目录 `开发计划-全资料AI辅助.md`

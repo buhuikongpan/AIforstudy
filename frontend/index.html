@@ -5,7 +5,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>考研学习平台</title>
-    <link rel="stylesheet" href="css/style.css?v=42">
+    <link rel="stylesheet" href="css/style.css?v=45">
 </head>
 <body>
     <div class="app">
@@ -20,51 +20,47 @@
                     <button class="mode-tab" data-mode="B" onclick="switchMode('B')">🎯 引导输出</button>
                     <button class="mode-tab" data-mode="C" onclick="switchMode('C')">📝 课后问答</button>
                 </nav>
-                <!-- 科目切换 -->
-                <nav class="subject-tabs" aria-label="科目切换">
-                    <button class="subject-tab active" data-subject="math" onclick="switchSubject('math')">📐 数学</button>
-                    <button class="subject-tab" data-subject="english" onclick="switchSubject('english')">📖 英语</button>
-                    <button class="subject-tab" data-subject="politics" onclick="switchSubject('politics')">🗳️ 政治</button>
-                    <button class="subject-tab" data-subject="zhuanye" onclick="switchSubject('zhuanye')">🎓 专业课</button>
-                </nav>
+                <!-- 科目切换（动态科目 = 托管库顶层文件夹，每科目文件/会话独立隔离，AI 配置共享） -->
+                <nav class="subject-tabs" id="subjectTabs" aria-label="科目切换"></nav>
+                <button class="subject-add-btn" id="subjectAddBtn" onclick="FSTree.createSubject()" title="新建科目" aria-label="新建科目">＋科目</button>
             </div>
-            <button class="btn-settings" onclick="toggleRotateLandscape()" aria-label="整站横屏旋转" title="整站横屏旋转">🔄</button>
             <button class="btn-settings" onclick="showSettings()" aria-label="模型设置">⚙️</button>
         </header>
 
         <!-- 主内容区 -->
         <main class="main-content" id="mainContent">
-            <!-- 左侧：视频列表（从上到下） -->
-            <aside class="video-sidebar" aria-label="视频目录">
+            <!-- 左侧：托管资源管理器（文件中心，全部资料） -->
+            <aside class="video-sidebar" aria-label="学习资料">
                 <div class="sidebar-header">
-                    <span class="sidebar-title">📁 视频目录</span>
+                    <span class="sidebar-title">📚 学习资料</span>
                     <div class="sidebar-actions">
-                        <button class="btn-sm btn-del-batch" onclick="onDelBatchClick()" title="批量删除（首次点击进入选择模式，再次点击确认删除）" aria-label="批量删除视频">🗑️<span class="del-batch-count" id="delBatchCount" style="display:none"></span></button>
-                        <button class="btn-sm" onclick="batchSummaries()" title="一键补生成课程总结（字幕已完成但无总结的视频）" aria-label="批量生成课程总结">📑</button>
-                        <button class="btn-sm" onclick="rescanVideos()" title="重新扫描本地目录（找回手动放入 storage/videos 的视频）" aria-label="重新扫描本地目录">🔎</button>
-                        <button class="btn-sm" onclick="showNewFolderDialog()" title="新建文件夹" aria-label="新建文件夹">📂</button>
-                        <button class="btn-sm" onclick="document.getElementById('folderUploadInput').click()" title="扫描文件夹上传" aria-label="扫描文件夹上传">📤</button>
-                        <button class="btn-sm btn-primary-sm" onclick="document.getElementById('uploadInput').click()" title="上传视频" aria-label="上传视频">＋</button>
+                        <button class="btn-sm btn-del-batch" onclick="FSTree.onDelBatchClick()" title="批量删除（首次点击进入选择模式，再次点击确认删除）" aria-label="批量删除">🗑️<span class="del-batch-count" id="delBatchCount" style="display:none"></span></button>
+                        <button class="btn-sm" onclick="FSTree.showTrash()" title="回收站（恢复/彻底删除）" aria-label="回收站">♻️</button>
+                        <button class="btn-sm" onclick="FSTree.mkdir(FSTree.selectedFolderId)" title="新建文件夹" aria-label="新建文件夹">📂</button>
+                        <button class="btn-sm" onclick="document.getElementById('folderUploadInput').click()" title="上传文件夹" aria-label="上传文件夹">📤</button>
+                        <button class="btn-sm btn-primary-sm" onclick="document.getElementById('uploadInput').click()" title="上传文件（上传到当前选中的文件夹）" aria-label="上传文件">＋</button>
                     </div>
                 </div>
-                <div class="upload-folder-row">
-                    <label for="uploadFolderSelect">上传到：</label>
-                    <select id="uploadFolderSelect"><option value="0">（未分类）</option></select>
+                <div class="upload-folder-row" title="点击树节点上的 📌 可切换上传目标">
+                    <label for="fsTargetHint">上传到：</label><span id="fsTargetHint" style="font-size:12px">📁 根目录（托管库）</span>
                 </div>
                 <div class="sidebar-search-row">
-                    <input type="text" id="videoSearch" class="video-search" placeholder="🔍 搜索视频…（标题/文件名）" oninput="onVideoSearch(this.value)" aria-label="搜索视频">
+                    <input type="text" id="videoSearch" class="video-search" placeholder="🔍 搜索文件…（全部资料）" aria-label="搜索文件">
                 </div>
                 <div class="sidebar-body" id="videoTreeBody">
                     <div class="loading" id="pageLoadCheck">⏳ 如果这句话一直不消失，说明 JS 没加载</div>
                 </div>
-                <input type="file" id="uploadInput" accept="video/mp4,video/avi,video/mkv,video/mov" style="display:none" onchange="uploadVideo(this)">
-                <input type="file" id="folderUploadInput" style="display:none" webkitdirectory multiple onchange="uploadFolder(this)">
+                <input type="file" id="uploadInput" multiple style="display:none" onchange="FSTree.uploadFromInput(this)">
+                <input type="file" id="folderUploadInput" style="display:none" webkitdirectory multiple onchange="FSTree.uploadFromInput(this)">
             </aside>
 
             <div class="splitter" id="splitterSidebar" title="拖动调整视频目录宽度"></div>
 
-            <!-- 中间：视频播放区 -->
+            <!-- 中间：全类型查看器（文件中心） -->
             <div class="video-center">
+                <div class="viewer-stage" id="viewerStage">
+                <!-- 视频窗格（现有播放器原样保留） -->
+                <div class="viewer-pane" id="videoPane">
                 <div class="video-player-wrapper" id="videoWrapper">
                     <video id="videoPlayer" preload="auto" playsinline webkit-playsinline x5-playsinline disablepictureinpicture>
                         您的浏览器不支持视频播放
@@ -95,9 +91,11 @@
                         <button class="speed-btn" onclick="setSpeed(5)">5x</button>
                         <span class="speed-sep"></span>
                         <button class="speed-btn" onclick="toggleFullscreen()" title="全屏（全屏后字幕/倍速/截图仍可用）" aria-label="全屏">⛶</button>
-                        <button class="speed-btn" onclick="togglePip()" title="画中画" aria-label="画中画">🖼️</button>
-                        <button class="speed-btn" onclick="toggleSubtitleOverlay()" title="字幕开关" aria-label="字幕开关">📄</button>
-                        <button class="speed-btn" id="captureToggleBtn" onclick="toggleAutoCapture()" title="自动截图当前画面" aria-label="自动截图当前画面">🎥</button>
+                        <button class="speed-btn" id="subtitleOverlayBtn" onclick="PlayerExtras.toggleSubtitleVisible()" title="字幕显示/隐藏（S）" aria-label="字幕开关">📄</button>
+                        <button class="speed-btn" onclick="PlayerExtras.subtitleCfgStep('fontSize',-1)" title="字幕字号 -（[）">A-</button>
+                        <button class="speed-btn" onclick="PlayerExtras.subtitleCfgStep('fontSize',1)" title="字幕字号 +（]）">A+</button>
+                        <button class="speed-btn" onclick="PlayerExtras.subtitleCfgStep('opacity',-1)" title="字幕底板更透明">◐</button>
+                        <button class="speed-btn" onclick="PlayerExtras.subtitleCfgStep('opacity',1)" title="字幕底板更实">◑</button>
                     </div>
                     <!-- 自绘控制条（底部）：播放/进度/时间——所有浏览器统一显示，不依赖系统播放器 -->
                     <div class="vc-bar hide" id="vcBar">
@@ -109,21 +107,49 @@
                     </div>
                     <!-- 按住画面滑动时的进度提示浮层 -->
                     <div class="vc-seek-tip" id="vcSeekTip" style="display:none"></div>
+                    <!-- 视频窗格结尾 -->
                     <div class="video-placeholder" id="videoPlaceholder">
                         <div class="placeholder-icon">🎬</div>
-                        <div class="placeholder-text">从左侧选择视频开始学习</div>
+                        <div class="placeholder-text">从左侧选择资料开始学习</div>
                     </div>
                 </div>
-                <!-- 字幕面板（仅 A 模式显示，带时间戳点击跳转） -->
-                <div class="subtitle-panel" id="subtitlePanel" style="display:none">
-                    <div class="subtitle-header">
-                        <span>📺 字幕 <span class="subtitle-count" id="subtitleCount"></span></span>
-                        <button class="btn-sm" onclick="toggleSubtitlePanel()" id="subtitleToggleBtn">收起</button>
-                    </div>
-                    <div class="subtitle-list" id="subtitleList">
-                        <div class="loading">加载字幕中...</div>
-                    </div>
                 </div>
+                <!-- PDF 窗格（pdf.js，Office 转换后也走这里） -->
+                <div class="viewer-pane" id="pdfPane" style="display:none">
+                    <div class="pdf-toolbar">
+                        <button class="pdf-btn" onclick="Viewer.toggleOutline()" title="章节目录">≡</button>
+                        <button class="pdf-btn" onclick="Viewer.pdfPrev()" title="上一页">◀</button>
+                        <span class="pdf-page-label" id="pdfPageLabel">- / -</span>
+                        <button class="pdf-btn" onclick="Viewer.pdfNext()" title="下一页">▶</button>
+                        <span class="pdf-sep"></span>
+                        <button class="pdf-btn" onclick="Viewer.pdfZoomOut()" title="缩小">－</button>
+                        <button class="pdf-btn" onclick="Viewer.pdfZoomIn()" title="放大">＋</button>
+                        <button class="pdf-btn" onclick="Viewer.pdfFit()" title="适应宽度">⤢</button>
+                    </div>
+                    <div class="pdf-outline" id="pdfOutline" style="display:none"></div>
+                    <div class="pdf-scroll" id="pdfScroll"></div>
+                </div>
+                <!-- 图片窗格 -->
+                <div class="viewer-pane" id="imgPane" style="display:none">
+                    <img id="viewerImg" class="viewer-img" alt="图片预览">
+                </div>
+                <!-- 文本/Markdown 窗格 -->
+                <div class="viewer-pane viewer-text-pane" id="textPane" style="display:none">
+                    <div class="viewer-text-header"><span id="viewerTextName"></span><span class="viewer-text-kind">文本</span></div>
+                    <pre id="viewerText" class="viewer-text-body"></pre>
+                </div>
+                <!-- 音频窗格 -->
+                <div class="viewer-pane" id="audioPane" style="display:none">
+                    <div class="info-icon">🎵</div>
+                    <div class="info-title" id="audioName"></div>
+                    <audio id="viewerAudio" controls style="width:80%"></audio>
+                </div>
+                <!-- 信息窗格（处理中/错误/不支持预览） -->
+                <div class="viewer-pane" id="infoPane" style="display:none">
+                    <div class="info-body" id="infoBody"></div>
+                </div>
+                </div><!-- /viewer-stage -->
+                <!-- 字幕列表面板已移除（2026-02）：画面字幕覆盖层保留，📄 开关控制 -->
             </div>
 
             <!-- 右侧：聊天区 -->
@@ -133,6 +159,7 @@
                     <span id="chatModeLabel">💬 即时问答</span>
                     <span class="chat-subject" id="chatSubjectLabel">📐 数学</span>
                     <div class="chat-header-actions">
+                        <button class="btn-sm" onclick="OrchestratorUI.preview()" title="上下文预览：看 agent 实际注入了哪些资料（透明化层）" aria-label="上下文预览">🧩</button>
                         <button class="btn-sm" onclick="toggleConversationList()" title="显示/隐藏对话列表" aria-label="显示或隐藏对话列表">☰</button>
                         <button class="btn-sm btn-primary-sm" onclick="newConversation()" title="新对话" aria-label="新建对话">＋</button>
                     </div>
@@ -152,7 +179,7 @@
                     <div class="chat-main">
                         <div class="chat-messages" id="chatMessages">
                             <div class="message system">
-                                <div class="msg-content">👋 选择视频开始学习，或直接提问！</div>
+                                <div class="msg-content">👋 从左侧选择资料开始学习，或直接提问！提问时会自动带上你正在看的内容。</div>
                             </div>
                         </div>
                         <div class="chat-input-area">
@@ -173,7 +200,8 @@
                             <div class="input-row">
                                 <div class="input-extra">
                                     <button class="btn-img" id="voiceInputBtn" onclick="toggleVoiceInput()" title="🎤 语音输入（录音后自动填入输入框）" aria-label="语音输入">🎤</button>
-                                    <button class="btn-img" onclick="document.getElementById('imgInput').click()" title="上传图片/草稿" aria-label="上传图片或草稿">🖼️</button>
+                                    <button class="btn-img" onclick="PlayerExtras.captureCurrentView()" title="截图当前查看内容（视频当前帧 / PDF 当前页）" aria-label="截图当前内容">📷</button>
+                                <button class="btn-img" onclick="document.getElementById('imgInput').click()" title="上传图片/草稿" aria-label="上传图片或草稿">🖼️</button>
                                     <input type="file" id="imgInput" accept="image/*" style="display:none" onchange="onImagePick(this)">
                                 </div>
                                 <textarea id="chatInput" rows="2" placeholder="输入问题，回车发送..." onkeydown="onInputKeydown(event)" onpaste="onPaste(event)"></textarea>
@@ -210,7 +238,14 @@
             </div>
             <div class="modal-body">
 
-                <details class="provider-group" style="border:1px solid var(--color-border);border-radius:10px;padding:10px 12px;margin-bottom:12px">
+                                <div class="settings-tabs" role="tablist">
+                    <button class="settings-tab active" data-pane="tabModels" onclick="switchSettingsTab('tabModels', this)">🤖 模型</button>
+                    <button class="settings-tab" data-pane="tabOrch" onclick="switchSettingsTab('tabOrch', this)">🧩 编排与转换</button>
+                    <button class="settings-tab" data-pane="tabSec" onclick="switchSettingsTab('tabSec', this)">🔐 安全</button>
+                </div>
+                <div class="settings-pane" id="tabModels">
+
+<details class="provider-group">
                     <summary style="cursor:pointer;font-size:14px;font-weight:600;padding:4px 0">🧠 文本（主模型）<b id="pgNameMain">未命名</b> <span class="pg-sum" id="pgSumMain" style="font-weight:400;font-size:12px;color:var(--color-text-muted)"></span></summary>
                     <div class="form-card" style="margin-top:6px">
                         <div style="font-size:12px;color:var(--color-text-muted);margin-bottom:4px">▼ 提供商列表（可多个；勾选「当前」生效；模型获取即录、勾选启停）</div>
@@ -220,17 +255,7 @@
                     </div>
                 </details>
 
-                <details class="provider-group" style="border:1px solid var(--color-border);border-radius:10px;padding:10px 12px;margin-bottom:12px">
-                    <summary style="cursor:pointer;font-size:14px;font-weight:600;padding:4px 0">👁️ 视觉辅助<b id="pgNameVision">未命名</b> <span class="pg-sum" id="pgSumVision" style="font-weight:400;font-size:12px;color:var(--color-text-muted)"></span></summary>
-                    <div class="form-card" style="margin-top:6px">
-                        <label class="checkbox-row"><input type="checkbox" id="setVisionEnabled" checked> 启用视觉辅助</label>
-                        <div style="font-size:12px;color:var(--color-text-muted);margin:4px 0">▼ 提供商列表（可多个；勾选「当前」生效；模型获取即录、勾选启停）</div>
-                        <div id="tierItemsVision"></div>
-                        <button class="btn-sm btn-primary-sm" onclick="addTierProvider('vision')" type="button">＋ 增加提供商</button>
-                    </div>
-                </details>
-
-                <details class="provider-group" style="border:1px solid var(--color-border);border-radius:10px;padding:10px 12px;margin-bottom:12px">
+                <details class="provider-group">
                     <summary style="cursor:pointer;font-size:14px;font-weight:600;padding:4px 0">🎬 语音识别<b id="pgNameAsr">未命名</b> <span class="pg-sum" id="pgSumAsr" style="font-weight:400;font-size:12px;color:var(--color-text-muted)"></span></summary>
                     <div class="form-card" style="margin-top:6px">
                         <div style="font-size:12px;color:var(--color-text-muted);margin-bottom:4px">▼ 提供商列表（可多个；勾选「当前」生效；模型获取即录、勾选启停）</div>
@@ -290,12 +315,24 @@
                     <label>⚡ 一键填充常用服务（填入地址与模型名；Key 仍需填写或保留已有）</label>
                     <div class="form-card preset-row">
                         <button type="button" class="btn-sm preset-btn" onclick="applyPreset('main')">🧠 DeepSeek 主模型</button>
-                        <button type="button" class="btn-sm preset-btn" onclick="applyPreset('vision')">👁️ 智谱 GLM-4V</button>
                         <button type="button" class="btn-sm preset-btn" onclick="applyPreset('asr')">🎬 千问 ASR</button>
                     </div>
                 </div>
 
-                <div class="form-group">
+                                </div>
+
+                <div class="settings-pane" id="tabOrch" style="display:none">
+
+<div class="form-group">
+                    <label>🧩 上下文编排 & 文件转换（非黑盒：每个文件的注入内容可在聊天面板 🧩 预览）</label>
+                    <div class="form-card" id="orchSettings"></div>
+                </div>
+
+                                </div>
+
+                <div class="settings-pane" id="tabSec" style="display:none">
+
+<div class="form-group">
                     <label>🔐 访问令牌（可选，服务端 .env 配置 PLATFORM_TOKEN 后必填）</label>
                     <div class="form-card">
                         <input type="text" id="setToken" placeholder="PLATFORM_TOKEN 的值（未开启可留空）">
@@ -305,8 +342,9 @@
                     </div>
                 </div>
 
+                </div>
 
-                <div style="text-align:right;margin-top:14px">
+<div style="text-align:right;margin-top:14px">
                     <button class="btn-primary" onclick="saveSettings()">💾 保存配置</button>
                 </div>
             </div>
@@ -333,9 +371,21 @@
     </div>
 
     <!-- 内联测试：验证 JS 是否能运行 -->
-    <script src="js/app.js?v=35"></script>
+    <script>
+    // 模块加载诊断（临时，问题排查用）：错误直接显示在页面右下角
+    window.__fsErrors = [];
+    window.onerror = function (msg, src, line, col) {
+        window.__fsErrors.push(msg + ' @' + (src || '').split('/').pop() + ':' + line);
+        var el = document.getElementById('fsDiag');
+        if (el) { el.style.display = 'block'; el.textContent = '❌ ' + window.__fsErrors.join(' | '); }
+    };
+    </script>
+    <script src="js/app.js?v=40"></script>
+    <!-- 文件中心模块（ES modules：资源管理器 + 全类型查看器 + 编排器 UI） -->
+    <script type="module" src="js/modules/main.js?v=19"></script>
     <!-- KaTeX（本地化，不依赖 CDN，保证公式渲染稳定） -->
     <link rel="stylesheet" href="vendor/katex/katex.min.css">
     <script src="vendor/katex/katex.min.js" defer></script>
+    <div id="fsDiag" style="display:none;position:fixed;right:8px;bottom:8px;z-index:99999;max-width:70%;background:#1c1e21;color:#ffd7d7;font-size:12px;padding:8px 12px;border-radius:8px;font-family:monospace"></div>
 </body>
 </html>

@@ -17,15 +17,16 @@ from ...core.paths import resolve, to_abs, to_rel
 from ...models import Video, Subtitle, Folder
 from ..deps import get_db
 from ...services.asr_service import transcribe_audio
-from ...services.llm_service import summarize_lecture
+from ...services.llm_service import summarize_lecture, SUMMARY_LOCK
 
 
 router = APIRouter(prefix="/api/videos", tags=["视频管理"])
 
 # 全局串行锁：同一时刻只允许一个视频在执行字幕提取（ASR），避免并发触发云接口限流
 _extract_lock = asyncio.Lock()
-# 课程总结生成同样串行（分段提取 + 合并要调多次 LLM，防并发限流）
-_summary_lock = asyncio.Lock()
+# 课程总结生成同样串行（分段提取 + 合并要调多次 LLM，防并发限流）——
+# 与文档总结（file_service）共用 llm_service.SUMMARY_LOCK，两边不会同时打 LLM
+_summary_lock = SUMMARY_LOCK
 
 # 批量补生成总结的进度状态（一键补齐存量视频）
 _batch_state = {"running": False, "queued": 0, "done": 0, "failed": 0}

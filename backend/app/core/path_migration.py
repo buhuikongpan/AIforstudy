@@ -20,7 +20,7 @@ from .paths import resolve, to_abs, to_rel
 # videos 表里所有存文件的列
 VIDEO_COLS = ("file_path", "subtitle_path", "summary_path", "compressed_path")
 
-# 聊天消息里的上传图片路径（模型拿这个路径去调 read_image）
+# 聊天消息里的上传图片路径（消息里的图块 / 模型调 read 工具拿到的路径）
 _UPLOAD_RE = re.compile(
     r"(?:[A-Za-z]:)?[\\/][^\s\"'\[\],]*?storage[\\/]uploads[\\/][^\s\"'\[\],\\/]+"
 )

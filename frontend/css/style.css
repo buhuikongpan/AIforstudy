@@ -213,6 +213,9 @@ html, body {
 .main-content {
     display: flex;
     flex: 1;
+    min-height: 0;           /* 关键：flex 主轴（垂直）的自动最小尺寸。缺了它，目录一长就把本容器顶到内容高度，
+                                撑破 100dvh 的 .app，导致右侧会话框底部被 body 的 overflow:hidden 裁掉。
+                                注意 overflow: clip 不享受「overflow≠visible 则 min-size 归 0」的豁免，必须显式写 */
     overflow: hidden;
     overflow: clip;
     gap: 0;
@@ -227,6 +230,10 @@ html, body {
     position: relative;
     z-index: 20;
     transition: background var(--dur-fast) var(--ease);
+    touch-action: none;              /* 触屏拖动时不让浏览器抢去滚页面 */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
 }
 .splitter:hover, .splitter.dragging { background: var(--color-primary); }
 .splitter::after {
@@ -234,6 +241,20 @@ html, body {
     position: absolute;
     left: -3px; right: -3px; top: 0; bottom: 0;
 }
+/* 拖动中：一条加宽高亮，手指按住时也看得清拖到哪儿了 */
+.splitter.dragging::before {
+    content: '';
+    position: absolute;
+    left: -1px; right: -1px; top: 0; bottom: 0;
+    background: var(--color-primary);
+    box-shadow: 0 0 10px var(--color-primary-ring);
+}
+/* 触屏 / 触控笔：命中区加宽到约 24px，手指才按得住（鼠标保持 10px，免得挡住侧栏最右缘的按钮） */
+@media (pointer: coarse) {
+    .splitter::after { left: -10px; right: -10px; }
+}
+/* 拖动三栏期间全局保持左右箭头光标（鼠标端） */
+body.col-resizing { cursor: col-resize; }
 
 /* ===== 左侧视频侧边栏 ===== */
 .video-sidebar {
@@ -609,9 +630,19 @@ video::cue(b) { font-weight: bold; }
 .conv-sb-actions { display: flex; gap: 4px; }
 .conv-resizer {
     width: 5px; flex-shrink: 0; cursor: col-resize; background: transparent; transition: background var(--dur-fast);
+    position: relative;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
 }
 .conv-resizer:hover, .conv-resizer.dragging { background: var(--color-primary-soft); }
 .conv-resizer:active { background: #c6d4ff; }
+/* 触屏：命中区加宽到约 25px（视觉宽度不变），手指才拖得住 */
+@media (pointer: coarse) {
+    .conv-resizer::after {
+        content: ''; position: absolute; left: -10px; right: -10px; top: 0; bottom: 0;
+    }
+}
 .chat-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .conv-body { padding: 6px 8px 12px; }
 .conv-group { margin-bottom: 10px; }
@@ -794,6 +825,7 @@ video::cue(b) { font-weight: bold; }
 .model-picker-row {
     display: flex; align-items: center; gap: 8px; padding: 2px 2px 10px;
     font-size: 12px; color: var(--color-text-secondary);
+    flex-wrap: wrap;   /* 窄聊天栏（平板/窄窗口）下自动换行，避免“思考强度”右侧被截断 */
 }
 .model-picker-row label { flex: none; }
 .model-picker-row select {
@@ -1111,11 +1143,12 @@ video::cue(b) { font-weight: bold; }
     box-shadow: 0 0 0 3px var(--color-primary-ring);
 }
 
-/* ===== 树行操作图标：悬停/键盘聚焦时才显现 ===== */
-.tree-ctx { opacity: 0; visibility: hidden; }
+/* ===== 树行操作图标：⋯ 常驻可见（悬停高亮），老图标类不再隐藏 ===== */
+.tree-ctx { opacity: 1; visibility: visible; }
+.tree-ctx.tree-more { opacity: .5; }
 .tree-video:hover .tree-ctx, .tree-video-label:focus-within .tree-ctx,
 .tree-folder-label:hover .tree-ctx, .tree-folder-label:focus-within .tree-ctx {
-    opacity: .85; visibility: visible;
+    opacity: 1; visibility: visible;
 }
 .tree-ctx:hover { opacity: 1 !important; background: var(--color-border-light); color: var(--color-primary); }
 
@@ -1293,64 +1326,6 @@ textarea.voice-live {
     .btn-drawer-video { display: inline-flex; }
     .drawer-mask { display: block; }
     .chat-fab { display: flex; }
-}
-
-/* ==================================================================
-   手机横屏（≤900px 且横向）
-   ================================================================== */
-@media (max-width: 900px) and (orientation: landscape) {
-    .header { flex-wrap: nowrap; padding: 4px 10px; }
-    .logo { font-size: 13px; flex: 0 0 auto; }
-    .header-center {
-        order: 0; width: auto; flex: 1; min-width: 0; flex-direction: row; gap: 6px;
-        align-items: center;
-    }
-    /* 横屏：模式/科目标签左右两段，各自可横向滑动 */
-    .mode-tabs, .subject-tabs {
-        flex: 0 1 auto;
-        width: auto;
-        max-width: 50%;
-    }
-    .mode-tab, .subject-tab { padding: 5px 10px; font-size: 12px; }
-
-    .video-sidebar { width: min(52vw, 400px) !important; }
-    .chat-panel { width: min(56vw, 440px) !important; }
-
-    .chat-fab { bottom: auto; top: 58px; right: 10px; width: 44px; height: 44px; font-size: 18px; }
-    .video-center { padding: 6px; gap: 6px; }
-}
-
-/* ==================================================================
-   手动横屏旋转（整站 90°，竖屏 → 横屏）
-   ================================================================== */
-html.rotate-landscape { background: #e9ebf2; }
-html.rotate-landscape body { margin: 0; overflow: hidden; }
-html.rotate-landscape .app {
-    position: fixed;
-    top: 0; left: 0;
-    width: 100vh;
-    height: 100vw;
-    transform: rotate(90deg) translateY(-100%);
-    transform-origin: 0 0;
-    background: var(--color-bg);
-}
-@media (orientation: portrait) {
-    html.rotate-landscape .main-content { height: calc(100vw - 56px); min-height: 0; }
-}
-html.rotate-landscape .main-content { flex: 1; min-height: 0; }
-html.rotate-landscape .video-center { padding: 0; gap: 0; height: 100%; min-height: 0; }
-html.rotate-landscape .video-player-wrapper {
-    height: 100%; min-height: 0; box-shadow: none; border-radius: 0; border: none;
-    display: flex; align-items: center; justify-content: center; overflow: hidden;
-}
-html.rotate-landscape #videoPlayer {
-    max-width: 100%; max-height: 100%; width: auto; height: auto;
-    object-fit: contain; background: #000;
-}
-@media (orientation: landscape) {
-    html.rotate-landscape .app {
-        position: static; width: auto; height: 100vh; transform: none;
-    }
 }
 
 /* ==================================================================
@@ -1558,12 +1533,9 @@ video::-webkit-media-controls { -webkit-appearance: none; appearance: none; }
 .end-btn.primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
 
 #videoWrapper:fullscreen .end-card,
-#videoWrapper:-webkit-full-screen .end-card,
-html.rotate-landscape .end-card {
+#videoWrapper:-webkit-full-screen .end-card {
     padding: 24px 36px;
 }
-html.rotate-landscape .end-title { font-size: 20px; }
-html.rotate-landscape .end-actions { gap: 16px; }
 
 @media (max-width: 900px) {
     .end-card { padding: 24px 20px; }
@@ -1624,10 +1596,9 @@ html.rotate-landscape .end-actions { gap: 16px; }
     .modal-content { max-width: 92vw !important; width: 92vw; max-height: 86vh; overflow: auto; }
 }
 
-/* 全屏/旋转：禁用 hover 常显，控制条显隐由 JS 控制 */
+/* 全屏：禁用 hover 常显，控制条显隐由 JS 控制 */
 #videoWrapper:fullscreen .video-controls-overlay,
-#videoWrapper:-webkit-full-screen .video-controls-overlay,
-html.rotate-landscape .video-controls-overlay {
+#videoWrapper:-webkit-full-screen .video-controls-overlay {
     opacity: 0; pointer-events: none;
 }
 
@@ -1729,7 +1700,7 @@ html.rotate-landscape .video-controls-overlay {
 .tool-hint.failed { color: var(--color-danger); border-color: var(--color-danger-bg); background: var(--color-danger-bg); }
 
 /* ==================================================================
-   ask 工具（ask_user_question）：AI 提问卡片
+   交互工具卡片（ask_user_question 提问 / quiz_user 出题）
    模型提问文本同样受「公式铁律」约束，公式由 renderMath 渲染
    ================================================================== */
 .ask-card {
@@ -1745,6 +1716,21 @@ html.rotate-landscape .video-controls-overlay {
     margin-top: 12px;
     padding-top: 12px;
     border-top: 1px dashed var(--color-border);
+}
+/* 出题卡片（quiz_user）：用琥珀色，和"需要你确认"（蓝色）区分开；不用绿色以免误读成"答对了" */
+.ask-card.quiz-card {
+    background: var(--color-warning-bg);
+    border-color: var(--color-warning);
+}
+.ask-kind {
+    display: inline-block;
+    padding: 1px 8px;
+    margin-bottom: 8px;
+    border-radius: 999px;
+    background: var(--color-warning-bg);
+    color: var(--color-warning);
+    font-size: 11.5px;
+    font-weight: 600;
 }
 .ask-header {
     display: inline-block;
@@ -1820,9 +1806,58 @@ html.rotate-landscape .video-controls-overlay {
 }
 .ask-submit:hover { filter: brightness(1.06); }
 .ask-submit:disabled { opacity: .5; cursor: default; box-shadow: none; filter: none; }
+/* 图片作答：整张卡片共用一组图（拍照交作业）*/
+.ask-attach {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+    margin-top: 10px;
+}
+.ask-img-btn {
+    padding: 5px 12px;
+    font-size: 12.5px;
+    white-space: nowrap;   /* 卡片窄时不要把「上传解答照片」从词中间折断 */
+    color: var(--color-text);
+    background: var(--color-surface);
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.ask-img-btn:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.ask-img-btn:disabled { opacity: .5; cursor: default; border-color: var(--color-border); color: var(--color-text-muted); }
+.ask-img-hint { font-size: 11.5px; color: var(--color-text-muted); }
+.ask-img-list { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
+.ask-img-thumb { position: relative; display: inline-block; }
+.ask-img-thumb img {
+    display: block;
+    width: 64px; height: 64px;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border-light);
+}
+.ask-img-del {
+    position: absolute; top: -6px; right: -6px;
+    width: 18px; height: 18px;
+    padding: 0; line-height: 1;
+    font-size: 11px;
+    color: #fff;
+    background: rgba(0, 0, 0, .6);
+    border: none; border-radius: 50%;
+    cursor: pointer;
+}
+.ask-img-del:hover { background: var(--color-danger); }
+.ask-img-del:disabled { display: none; }   /* 已提交，不再允许移除 */
 /* 已提交 / 历史只读态 */
 .ask-card.submitted { background: var(--color-surface-subtle); border-color: var(--color-border); }
 .ask-card.submitted .ask-option { background: var(--color-surface-subtle); }
+/* 历史里「当时未作答、直接继续」的卡片：虚线边框 + 降饱和，和已作答的实心卡片区分 */
+.ask-card.unanswered {
+    background: var(--color-surface-subtle);
+    border-style: dashed;
+    border-color: var(--color-border);
+    box-shadow: none;
+}
+.ask-card.unanswered .ask-option { background: var(--color-surface-subtle); }
+.ask-card.unanswered .ask-hint { color: var(--color-warning); font-weight: 600; }
 .ask-card.readonly .ask-option { cursor: default; }
 .ask-card.readonly .ask-option:hover { border-color: var(--color-border-light); background: var(--color-surface-subtle); }
 .ask-echo {
@@ -1841,4 +1876,326 @@ html.rotate-landscape .video-controls-overlay {
     .ask-option input { width: 18px; height: 18px; }
     .ask-custom { min-height: 40px; font-size: 15px; }
     .ask-submit { min-height: 40px; padding: 8px 20px; }
+    .ask-img-btn { min-height: 40px; padding: 8px 14px; }
 }
+/* ================= 文件中心：查看器 & 资源管理器（全资料 AI 辅助改造） ================= */
+.viewer-stage { flex: 1; min-height: 0; display: flex; }
+.viewer-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; min-width: 0; }
+
+/* PDF 窗格 */
+.pdf-toolbar {
+    flex: none; display: flex; align-items: center; gap: 6px;
+    padding: 6px 10px; background: var(--color-surface, #fff);
+    border: 1px solid var(--color-border-light); border-radius: var(--radius-md);
+}
+.pdf-btn {
+    border: 1px solid var(--color-border); background: var(--color-surface-subtle, #f5f6f8);
+    border-radius: 6px; padding: 2px 10px; cursor: pointer; font-size: 13px; line-height: 1.6;
+}
+.pdf-btn:hover { background: var(--color-border-light, #e8eaee); }
+.pdf-page-label { font-size: 13px; color: var(--color-text); min-width: 64px; text-align: center; font-variant-numeric: tabular-nums; }
+.pdf-sep { flex: 1; }
+.pdf-scroll { flex: 1; min-height: 0; overflow-y: auto; background: #2b2f36; border-radius: var(--radius-md); margin-top: 8px; padding: 10px 0; }
+.pdf-page-wrap { position: relative; margin: 0 auto 14px; width: fit-content; max-width: 96%; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.35); }
+.pdf-canvas { display: block; }
+.pdf-page-num {
+    position: absolute; top: 4px; left: 6px; font-size: 11px; color: #888;
+    background: rgba(255,255,255,.85); border-radius: 4px; padding: 0 5px; z-index: 2;
+}
+.pdf-page-loading, .pdf-loading {
+    color: #cfd4dc; font-size: 13px; padding: 30px; text-align: center; width: 100%;
+}
+.pdf-page-wrap .pdf-page-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 0; }
+
+/* 图片窗格 */
+.viewer-img { max-width: 100%; max-height: 100%; object-fit: contain; margin: auto; border-radius: var(--radius-md); background: #0e1116; }
+#imgPane { align-items: center; justify-content: center; background: #1b1f26; border-radius: var(--radius-lg); }
+
+/* 文本/Markdown 窗格 */
+.viewer-text-pane { background: var(--color-surface, #fff); border: 1px solid var(--color-border-light); border-radius: var(--radius-lg); overflow: hidden; }
+.viewer-text-header {
+    flex: none; display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 12px; font-size: 13px; color: var(--color-text-muted);
+    border-bottom: 1px solid var(--color-border-light); background: var(--color-surface-subtle, #f5f6f8);
+}
+.viewer-text-kind { font-size: 11px; border: 1px solid var(--color-border); border-radius: 4px; padding: 0 6px; }
+.viewer-text-body {
+    flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 14px 18px;
+    font-size: 13px; line-height: 1.75; white-space: pre-wrap; word-break: break-word;
+    font-family: Consolas, "Microsoft YaHei", monospace; color: var(--color-text);
+}
+.viewer-text-body.md-render { font-family: "Microsoft YaHei", sans-serif; }
+.viewer-text-body.md-render h3, .viewer-text-body.md-render h4, .viewer-text-body.md-render h5 { margin: 14px 0 6px; }
+.viewer-text-body.md-render .md-code { background: var(--color-surface-subtle, #f5f6f8); border: 1px solid var(--color-border-light); border-radius: 6px; padding: 8px 10px; overflow-x: auto; }
+.viewer-text-body.md-render .md-gap { height: 8px; }
+.viewer-text-body.md-render code { background: var(--color-surface-subtle, #f5f6f8); border-radius: 4px; padding: 0 4px; }
+
+/* 音频窗格 */
+#audioPane { align-items: center; justify-content: center; gap: 14px; background: var(--color-surface, #fff); border: 1px solid var(--color-border-light); border-radius: var(--radius-lg); }
+
+/* 信息窗格（处理中/错误/不支持预览） */
+#infoPane { align-items: center; justify-content: center; }
+.info-body { text-align: center; max-width: 520px; padding: 20px; }
+.info-icon { font-size: 44px; margin-bottom: 8px; }
+.info-title { font-size: 16px; font-weight: 600; color: var(--color-text); word-break: break-all; }
+.info-desc { font-size: 13px; color: var(--color-text-muted); margin: 8px 0 12px; line-height: 1.6; }
+.info-actions { display: flex; gap: 10px; justify-content: center; margin-top: 12px; }
+.task-list { margin-top: 10px; text-align: left; background: var(--color-surface, #fff); border: 1px solid var(--color-border-light); border-radius: 8px; padding: 8px 12px; }
+.task-row { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; color: var(--color-text); }
+.task-status { font-size: 12px; }
+.task-pending { color: #999; } .task-running { color: #d90; } .task-done { color: #2a2; } .task-error { color: #c33; }
+.task-error { font-size: 12px; color: #c33; margin: 4px 0; word-break: break-all; }
+
+/* 资源管理器树增强 */
+.tree-folder-label.active { background: var(--color-surface-subtle, #f0f2f5); border-radius: 6px; }
+#videoTreeBody.drag-over { outline: 2px dashed var(--color-primary); outline-offset: -4px; border-radius: 8px; }
+.tree-vstatus.status-processing { color: #d90; }
+.trash-row { display: flex; align-items: center; gap: 8px; padding: 5px 4px; border-bottom: 1px solid var(--color-border-light); }
+.trash-name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 上下文预览（编排器透明化层） */
+.ctx-prev-meta { font-size: 13px; color: var(--color-text); margin-bottom: 8px; }
+.ctx-prev-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ctx-prev-table th, .ctx-prev-table td { border-bottom: 1px solid var(--color-border-light); padding: 4px 6px; text-align: left; }
+.ctx-prev-table th { color: var(--color-text-muted); font-weight: 600; }
+.ctx-prev-table .mono { font-family: Consolas, monospace; font-size: 12px; }
+.ctx-prev-text { max-height: 300px; overflow: auto; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; background: var(--color-surface-subtle, #f5f6f8); border-radius: 6px; padding: 10px; }
+
+/* 编排模板设置 */
+.orch-tpl label { display: block; font-size: 13px; margin: 2px 0; }
+.orch-tpl input[type="number"] { border: 1px solid var(--color-border); border-radius: 6px; padding: 2px 6px; }
+
+/* PDF 文本层（划词/复制用，pdf.js renderTextLayer） */
+.pdf-page-wrap .textLayer { position: absolute; inset: 0; overflow: hidden; opacity: 0.25; line-height: 1; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0; z-index: 3; }
+.pdf-page-wrap .textLayer span { position: absolute; white-space: pre; color: transparent; cursor: text; transform-origin: 0% 0%; }
+.pdf-page-wrap .textLayer ::selection { background: rgba(30, 120, 255, 0.4); }
+.pdf-page-wrap .textLayer .endOfWordContent { display: none; }
+
+/* 划词"问 AI"浮动按钮 */
+.selection-ask-btn {
+    position: fixed; z-index: 9999; border: none; cursor: pointer;
+    background: var(--color-primary, #2f6bff); color: #fff;
+    font-size: 13px; padding: 5px 12px; border-radius: 16px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.3);
+}
+.selection-ask-btn:hover { filter: brightness(1.1); }
+
+/* 动态科目：新建科目按钮 */
+.subject-add-btn {
+    flex: none; border: 1px dashed var(--color-border); background: transparent;
+    color: var(--color-text-muted); border-radius: 8px; padding: 4px 10px;
+    cursor: pointer; font-size: 13px; white-space: nowrap;
+}
+.subject-add-btn:hover { color: var(--color-primary); border-color: var(--color-primary); }
+
+/* 「⋯」更多操作菜单（树行操作收敛，防挡名字） */
+.tree-ctx.tree-more { font-weight: 700; letter-spacing: 2px; padding: 0 5px; min-width: 22px; text-align: center; }
+.ctx-menu {
+    position: fixed; z-index: 9999; min-width: 172px;
+    background: #ffffff; border: 1px solid #d0d4da;
+    border-radius: 10px; box-shadow: 0 8px 28px rgba(0, 0, 0, .25); padding: 4px;
+    overflow: hidden; isolation: isolate;
+}
+.ctx-menu-item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    font-size: 13px; color: #1c1e21; cursor: pointer;
+    border-radius: 6px; min-height: 34px; white-space: nowrap;
+}
+.ctx-menu-item:hover { background: #f0f2f5; }
+.ctx-menu-item.danger { color: #d33; }
+
+/* 树行总结状态对勾 */
+.tree-sum { cursor: pointer; font-size: 12px; flex: none; }
+.tree-sum-done { color: #23a55a; }
+.tree-sum-processing { color: #d90; }
+.tree-sum-failed { color: #c33; }
+
+/* 总结状态复选框（勾选=已总结，空框=未总结可点击生成） */
+.sum-cb {
+    width: 15px; height: 15px; margin: 0; flex: none;
+    accent-color: #23a55a; cursor: pointer; vertical-align: middle;
+}
+.sum-cb-empty { accent-color: var(--color-border, #bbb); }
+.sum-cb-empty:hover { accent-color: #23a55a; }
+
+/* 「⋯」菜单里的总结状态复选框 */
+
+/* 菜单第一列复选框 + 图标列定宽（防止文字被图标/复选框挤压遮挡） */
+.ctx-menu-item .ctx-menu-cb {
+    width: 15px !important; height: 15px !important; margin: 0 !important;
+    flex: 0 0 15px !important; accent-color: #23a55a !important;
+    cursor: pointer !important; pointer-events: auto !important;
+}
+.ctx-menu-item .ctx-menu-icon {
+    display: inline-block !important; width: 20px !important;
+    flex: 0 0 20px !important; text-align: center !important;
+}
+.ctx-menu-item { gap: 10px !important; }
+
+/* 对话框：按钮不被挤压 + 输入框样式（新建文件夹/重命名等） */
+#dialogActions > button {
+    flex: 0 0 auto; white-space: nowrap; min-width: 78px;
+}
+#dialogBody { min-height: 40px; }
+#dialogBody label {
+    display: block; font-size: 13px; font-weight: 600;
+    margin-bottom: 6px; color: var(--color-text-secondary, #5b6068);
+}
+#dialogBody .dlg-input, #dialogBody input[type="text"] {
+    width: 100%; box-sizing: border-box;
+    padding: 10px 12px; font-size: 14px; line-height: 1.5;
+    border: 1px solid #ccd0d6; border-radius: 8px;
+    background: #fff; color: #1c1e21; font-family: inherit; outline: none;
+    transition: border-color .15s, box-shadow .15s;
+}
+#dialogBody .dlg-input:focus, #dialogBody input[type="text"]:focus {
+    border-color: var(--color-primary, #2f6bff);
+    box-shadow: 0 0 0 3px rgba(47, 107, 255, .15);
+}
+#dialogBody .dlg-hint { font-size: 12px; color: #8a8f98; margin-top: 8px; line-height: 1.6; }
+#dialogBody select {
+    width: 100%; box-sizing: border-box; padding: 9px 11px; font-size: 14px;
+    border: 1px solid #ccd0d6; border-radius: 8px; background: #fff; color: #1c1e21;
+}
+
+/* 「⋯」菜单三列布局：复选框列 / 图标列 / 文字列（列宽固定，纵向严格对齐） */
+.ctx-menu-item {
+    display: flex !important; align-items: center !important;
+    gap: 8px !important; padding: 7px 10px !important;
+    min-height: 36px !important;
+}
+.ctx-menu-item .ctx-menu-cb,
+.ctx-menu-item .ctx-menu-cb-ph {
+    flex: 0 0 15px !important; width: 15px !important; height: 15px !important;
+    margin: 0 !important; display: inline-block;
+}
+.ctx-menu-item .ctx-menu-cb { accent-color: #23a55a; cursor: pointer; pointer-events: auto; }
+.ctx-menu-item .ctx-menu-icon {
+    flex: 0 0 18px !important; width: 18px !important;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 13px; line-height: 1;
+}
+.ctx-menu-item .ctx-menu-label { flex: 1 1 auto; white-space: nowrap; }
+
+/* ===== 播放器增强：黑边自适应（容器高度贴合视频宽高比） ===== */
+#videoWrapper.adaptive-aspect {
+    flex: 0 1 auto;
+    aspect-ratio: var(--video-ar, 16 / 9);
+    max-height: 100%;
+    width: 100%;
+    margin: auto;              /* 上下留白均分，视频垂直居中 */
+    align-self: center;
+}
+#videoPane { justify-content: center; }
+#videoWrapper.adaptive-aspect video {
+    width: 100%; height: 100%;
+}
+
+/* PDF 页面容器：禁止横向溢出（页面宽度按容器计算，超宽时也不出滚动条） */
+.pdf-scroll { overflow-x: hidden; }
+.pdf-page-wrap { max-width: 100%; }
+/* canvas 兜底：任何情况下都不允许超出容器（CSS 缩放，内部分辨率保留） */
+.pdf-page-wrap canvas { max-width: 100%; height: auto; }
+
+/* PDF 页容器定位上下文（offsetTop 计算与滚动对齐需要） */
+.pdf-scroll { position: relative; scroll-behavior: auto; }
+.pdf-page-wrap { scroll-margin-top: 8px; }
+
+/* ===== PDF 章节大纲面板 ===== */
+.pdf-outline {
+    flex: 0 0 auto; max-height: 38%; overflow-y: auto;
+    background: #ffffff; border: 1px solid #d0d4da;
+    border-radius: var(--radius-md, 8px); margin-bottom: 8px; padding: 4px;
+}
+.pdf-outline-loading { padding: 16px; text-align: center; color: #8a8f98; font-size: 13px; }
+.pdf-outline-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    color: #1c1e21;
+}
+.pdf-outline-item:hover { background: #f0f2f5; }
+.pdf-outline-item.lv1 { font-weight: 600; }
+.pdf-outline-item.lv2 { padding-left: 26px; color: #5b6068; }
+.pdf-outline-item .po-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pdf-outline-item .po-loc { flex: none; color: #8a8f98; font-size: 12px; font-variant-numeric: tabular-nums; }
+.pdf-outline-item .po-edits { flex: none; display: none; gap: 2px; }
+.pdf-outline-item:hover .po-edits { display: inline-flex; }
+.po-edit { cursor: pointer; font-size: 12px; padding: 1px 3px; border-radius: 4px; }
+.po-edit:hover { background: #e8eaee; }
+
+/* 大纲面板必须纵向排列（display:flex 由 JS 内联设置，默认 row 会把章节排成横向一条） */
+.pdf-outline { flex-direction: column !important; }
+
+/* ================= 设置弹窗：Tab 分页 + 紧凑化 ================= */
+.settings-tabs {
+    display: flex; gap: 4px; padding: 8px 16px 0;
+    border-bottom: 1px solid var(--color-border-light);
+}
+.settings-tab {
+    border: none; background: none; padding: 8px 12px;
+    font-size: 13px; color: var(--color-text-muted); cursor: pointer;
+    border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0;
+    transition: all var(--dur-fast) var(--ease);
+}
+.settings-tab:hover { color: var(--color-text); background: var(--color-surface-alt, #f5f6f8); }
+.settings-tab.active {
+    color: var(--color-primary); font-weight: 600;
+    border-bottom-color: var(--color-primary); background: none;
+}
+.settings-pane { padding-top: 10px; }
+
+/* 紧凑化：卡片变小、间距收紧 */
+#settingsModal .modal-body { padding: 12px 16px 14px; }
+#settingsModal .form-group { margin-bottom: 10px; }
+#settingsModal .form-group > label { margin-bottom: 4px; font-size: 12.5px; }
+#settingsModal .provider-group {
+    padding: 7px 10px !important; margin-bottom: 8px !important;
+    border-radius: 8px !important;
+}
+#settingsModal .provider-group > summary { font-size: 13px !important; padding: 2px 0 !important; }
+#settingsModal .form-card { padding: 8px 10px; }
+#settingsModal .form-card label { margin-bottom: 4px; font-size: 12.5px; }
+#settingsModal .form-card select,
+#settingsModal .form-card input {
+    padding: 7px 9px; font-size: 13px; margin-bottom: 6px;
+}
+#settingsModal .checkbox-row { font-size: 12.5px; margin: 6px 0; }
+#settingsModal .form-card > div[style*="font-size:12px"] { font-size: 11.5px !important; margin-bottom: 4px !important; }
+#settingsModal .form-card button[type="button"] { margin-bottom: 6px; }
+#settingsModal .modal-header { padding: 12px 16px; }
+
+/* 设置弹窗内：btn-sm 解除 30×30 图标尺寸（「增加提供商」等长文字按钮被裁成竖条的根因） */
+#settingsModal .form-card .btn-sm,
+#settingsModal .form-card .btn-primary-sm {
+    width: auto !important; height: auto !important;
+    padding: 6px 14px !important; font-size: 13px !important;
+    white-space: nowrap;
+}
+
+/* ================= 会话区紧凑化 ================= */
+/* 聊天头：科目徽章与顶部科目 tab 重复，隐藏（元素保留，switchSubject 仍会更新） */
+.chat-subject { display: none; }
+.chat-header { padding: 8px 12px; }
+.chat-header .btn-sm { width: 28px; height: 28px; font-size: 13px; }
+
+/* 模型/思考强度：收成一行紧凑控件（去掉 ×2「会话级」徽章，行 title 已说明） */
+.model-picker-row { gap: 6px; padding: 0 0 8px; font-size: 12px; }
+.model-picker-row label { font-size: 12px; }
+.model-picker-row select { padding: 4px 8px; font-size: 12px; max-width: 210px; }
+.model-picker-row #chatEffortSelect { max-width: 110px; }
+.model-picker-hint { display: none; }
+
+/* 输入区与消息气泡 */
+.chat-input-area { padding: 8px 12px 10px; }
+.btn-img { width: 32px; height: 32px; font-size: 15px; }
+.btn-send { padding: 8px 18px; }
+.chat-messages { padding: 12px 14px 10px; }
+
+/* 会话列表侧栏头部紧凑 */
+.conv-sb-header { padding: 8px 10px; font-size: 12.5px; }
+.conv-body { padding: 4px 6px 8px; }
+
+/* 窄面板下模型/思考强度收成单行：隐藏文字标签（select 的 title 提供说明），两个下拉并排 */
+.model-picker-row label { display: none; }
+.model-picker-row select { flex: 1 1 0; min-width: 0; max-width: none; }
+.model-picker-row { flex-wrap: nowrap; }

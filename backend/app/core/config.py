@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     subtitle_dir: str = str(BASE_DIR / "storage" / "subtitles")
     summary_dir: str = str(BASE_DIR / "storage" / "summaries")  # 课程总结 markdown
 
+    # 文件中心（全资料 AI 辅助）
+    library_dir: str = str(BASE_DIR / "storage" / "library")          # 托管库根（资源管理器本体）
+    library_trash_dir: str = str(BASE_DIR / "storage" / "library_trash")  # 回收站
+    artifacts_dir: str = str(BASE_DIR / "storage" / "artifacts")      # AI 产物（按 file_id 集中）
+    # x2t（OnlyOffice 转换引擎）可执行文件路径；留空 = 未配置（Office 文件不转 PDF，
+    # 状态标 error 并提示）。外部依赖，不 vendored 进仓库（AGPL）。
+    x2t_path: str = ""
+
     # 数据库（SQLite 放在项目 data 目录）
     database_url: str = f"sqlite:///{BASE_DIR / 'data' / 'kaoyan.db'}"
     data_dir: str = str(BASE_DIR / "data")  # 持久化备份目录

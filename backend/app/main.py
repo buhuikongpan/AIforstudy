@@ -11,8 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from .core.config import settings, BASE_DIR
 from .core.database import init_db, SessionLocal
 from .core.path_migration import normalize_paths
-from .models import Video
-from .api.routes import videos, chat, config, folders, voice
+from .models import Video, FileTask
+from .api.routes import videos, chat, config, folders, voice, files
 
 # SQLite 数据库：放在项目 data 目录（避免容器化遗留路径）
 DB_PATH = str(BASE_DIR / "data" / "kaoyan.db")
@@ -67,6 +67,24 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def no_cache_frontend(request: Request, call_next):
+    """前端源码禁缓存：/js/ 与 /css/ 下的文件（含 ES module 子模块）每次都用最新版。
+
+    为什么必须这样：ES module 里 `import './tree.js'` 是不带查询串的，
+    只有入口 main.js 带 ?v=N —— 子模块会一直被浏览器缓存，改了看不到效果
+    （排查时反复踩这个坑）。这里用响应头统一禁缓存，改完刷新即生效。
+    vendor/ 下的第三方库体积大、变动少，保留正常缓存。
+    """
+    resp = await call_next(request)
+    path = request.url.path
+    if path.startswith(("/js/", "/css/")) or path.endswith((".html",)):
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    return resp
+
+
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "message": "考研学习平台后端运行中"}
@@ -77,6 +95,7 @@ app.include_router(chat.router)
 app.include_router(config.router)
 app.include_router(folders.router)
 app.include_router(voice.router)
+app.include_router(files.router)
 
 # 初始化数据库
 init_db()
@@ -98,6 +117,28 @@ try:
 except Exception:
     pass
 
+# 启动恢复：上次中断的文件产物任务（服务重启/崩溃时线程被杀，任务会卡在 running/pending）
+try:
+    import asyncio as _aio
+    import threading as _th
+    _s2 = SessionLocal()
+    _stuck = _s2.query(FileTask).filter(
+        FileTask.status.in_(("pending", "running"))).all()
+    _fids = sorted({t.file_id for t in _stuck})
+    for _t in _stuck:
+        _t.status = "pending"
+        _t.error = ""
+    _s2.commit()
+    _s2.close()
+    if _fids:
+        from .services.file_service import _run_pipeline as _rp
+        for _fid in _fids:
+            _th.Thread(target=lambda f=_fid: _aio.run(_rp(f)),
+                       daemon=True, name=f"pipeline-resume-{_fid}").start()
+        print(f"  [i] 已恢复 {len(_fids)} 个文件的后台产物任务")
+except Exception as _e:
+    print(f"  [i] 任务恢复跳过：{_e}")
+
 # 启动巡检：把库里的绝对路径规范化为相对项目根的路径（搬家/改名后自动修复，幂等）
 try:
     s = SessionLocal()
@@ -116,7 +157,12 @@ os.makedirs(settings.video_dir, exist_ok=True)
 os.makedirs(settings.subtitle_dir, exist_ok=True)
 os.makedirs(settings.summary_dir, exist_ok=True)
 os.makedirs(settings.data_dir, exist_ok=True)
-# 用户上传的图片（工具化看图：落盘后由 read_image / modlens_read_image 读取）
+# 文件中心：托管库 / 回收站 / AI 产物
+os.makedirs(settings.library_dir, exist_ok=True)
+os.makedirs(settings.library_trash_dir, exist_ok=True)
+os.makedirs(settings.artifacts_dir, exist_ok=True)
+# 科目（顶层文件夹）完全由用户动态创建（＋科目按钮），不再预建默认科目
+# 用户上传的图片（落盘后直接内联进消息；历史重看走 read 工具 / /api/chat/uploads 接口）
 os.makedirs(os.path.join(settings.storage_dir, "uploads"), exist_ok=True)
 
 # 前端静态文件

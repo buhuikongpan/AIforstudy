@@ -64,6 +64,10 @@ class ChatSession(Base):
     model = Column(String(120), default="")  # 会话级模型（空 = 用全局主模型配置）
     effort = Column(String(20), default="")  # 会话级思考强度（low/medium/high/xhigh/max；空 = 用全局默认 high）
     file_id = Column(Integer, default=0)  # 绑定的文件（文件中心：上下文跟随当前查看的文件，0 = 未绑定）
+    # 沙箱分级（共识 Q4b：跟随+可锁定）：聚焦文件夹 = list_files/read 的作用域。
+    # focus_folder_id=0 未锁定时跟随播放器文件所属文件夹；>0 且 focus_locked=1 时锁定用户手动选择的文件夹。
+    focus_folder_id = Column(Integer, default=0)
+    focus_locked = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow)
 

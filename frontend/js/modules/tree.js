@@ -652,6 +652,78 @@ const FSTree = {
             addSystemMessage(`⚠️ ${(await resp.json().catch(() => ({}))).detail || '失败'}`);
         }
     },
+
+    // ===== 学习范围（沙箱）聚焦：锁定/解除（共识 Q4b） =====
+    async setFocus(folderId, locked = true) {
+        const convId = (typeof state !== 'undefined' && state.conversationId) || '';
+        if (!convId) {
+            addSystemMessage('ℹ️ 先发一条消息或新建对话，再锁定学习范围');
+            return;
+        }
+        const resp = await apiFetch(
+            `/api/chat/conversations/${convId}/focus?folder_id=${folderId}&locked=${locked ? 1 : 0}`,
+            { method: 'POST' });
+        if (!resp.ok) { addSystemMessage('⚠️ 设置学习范围失败'); return; }
+        const d = await resp.json();
+        if (typeof state !== 'undefined') {
+            state.focusFolderId = d.focus_folder_id || 0;
+            state.focusLocked = d.focus_locked || 0;
+        }
+        this.renderFocusChip(d.focus_folder_id, d.focus_folder_name, d.focus_locked);
+        addSystemMessage(d.focus_locked
+            ? `🎯 学习范围已锁定：${d.focus_folder_name}（AI 将聚焦该文件夹的全部资料）`
+            : '🎯 已解除锁定，学习范围恢复为跟随当前文件');
+    },
+
+    async clearFocus() {
+        const convId = (typeof state !== 'undefined' && state.conversationId) || '';
+        if (!convId) return;
+        const resp = await apiFetch(
+            `/api/chat/conversations/${convId}/focus?folder_id=0&locked=0`, { method: 'POST' });
+        if (resp.ok) {
+            if (typeof state !== 'undefined') { state.focusFolderId = 0; state.focusLocked = 0; }
+            this.renderFocusChip(0, '', 0);
+            addSystemMessage('🎯 已解除锁定，学习范围恢复为跟随当前文件');
+        }
+    },
+
+    renderFocusChip(folderId, name, locked) {
+        const chip = document.getElementById('focusChip');
+        const txt = document.getElementById('focusChipText');
+        const btn = document.getElementById('focusBtn');
+        if (!chip || !txt) return;
+        const on = locked && folderId;
+        chip.style.display = on ? 'inline-flex' : 'none';
+        if (on) txt.textContent = '🎯 ' + (name || ('文件夹 ' + folderId));
+        if (btn) btn.classList.toggle('active', !!on);
+    },
+
+    // 弹出文件夹选择（用现有对话框下拉，平铺）
+    pickFocusFolder() {
+        if (!this.cache) { addSystemMessage('⚠️ 文件树尚未加载'); return; }
+        const opts = [];
+        const walk = (fs, d) => {
+            for (const f of fs) {
+                const n = (f.files || []).length;
+                opts.push(`<option value="${f.id}">${' '.repeat(d * 2)}${escHtml(f.name)}${n ? '（' + n + '）' : ''}</option>`);
+                walk(f.children || [], d + 1);
+            }
+        };
+        walk(this.cache.folders || [], 0);
+        openDialog({
+            title: '🎯 锁定学习范围',
+            bodyHTML: '<label>选择要聚焦的文件夹</label>'
+                + `<select id="dlgFocus">${opts.join('')}</select>`
+                + '<div class="dlg-hint">锁定后 AI 只在这个文件夹范围内检索/阅读资料（复习整讲时用）；'
+                + '不锁定时跟随你当前播放或查看的文件。</div>',
+            onOk: () => {
+                const sel = document.getElementById('dlgFocus');
+                const fid = parseInt((sel || {}).value || '0', 10);
+                if (fid) this.setFocus(fid, true);
+                return true;
+            },
+        });
+    },
 };
 
 window.FSTree = FSTree;

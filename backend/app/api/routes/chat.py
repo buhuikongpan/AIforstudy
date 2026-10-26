@@ -22,7 +22,7 @@ from ...services.llm_service import (
 )
 from ...services.orchestrator import build_file_context
 from ...core.paths import resolve, to_rel
-from ...models import Video, Subtitle, ChatSession, ChatMessage, File as FileModel
+from ...models import Video, Subtitle, ChatSession, ChatMessage, File as FileModel, Folder
 from ..deps import get_db
 
 router = APIRouter(prefix="/api/chat", tags=["聊天"])
@@ -310,6 +310,8 @@ def list_conversations(subject: str = Query("math"), db: Session = Depends(get_d
             "model": s.model or "",  # 会话级模型（空 = 全局）
             "effort": s.effort or "",  # 会话级思考强度（空 = 全局默认 high）
             "file_id": getattr(s, "file_id", 0) or 0,  # 绑定的文件（0 = 未绑定）
+            "focus_folder_id": getattr(s, "focus_folder_id", 0) or 0,
+            "focus_locked": getattr(s, "focus_locked", 0) or 0,
             "message_count": counts.get(s.conv_id, 0),
             "updated_at": s.updated_at.isoformat() if s.updated_at else None,
         })
@@ -318,7 +320,8 @@ def list_conversations(subject: str = Query("math"), db: Session = Depends(get_d
 
 @router.post("/conversations")
 def create_conversation(subject: str = Query("math"), mode: str = Query("A"),
-                        file_id: int = Query(0), db: Session = Depends(get_db)):
+                        file_id: int = Query(0), focus_folder_id: int = Query(0),
+                        focus_locked: int = Query(0), db: Session = Depends(get_db)):
     """新建会话（可绑定当前查看的文件：上下文跟随文件，共识 D5）"""
     if mode not in MODE_NAMES:
         raise HTTPException(400, f"不支持的 Agent 模式: {mode}")
@@ -328,11 +331,14 @@ def create_conversation(subject: str = Query("math"), mode: str = Query("A"),
         raise HTTPException(400, "科目不能为空")
     conv_id = f"conv_{uuid.uuid4().hex[:12]}"
     sess = ChatSession(conv_id=conv_id, subject=subject, mode=mode, name=DEFAULT_NAME,
-                       file_id=file_id or 0)
+                       file_id=file_id or 0,
+                       focus_folder_id=focus_folder_id or 0,
+                       focus_locked=focus_locked or 0)
     db.add(sess)
     db.commit()
     return {"conversation_id": conv_id, "name": DEFAULT_NAME, "mode": mode,
-            "subject": subject, "file_id": file_id or 0}
+            "subject": subject, "file_id": file_id or 0,
+            "focus_folder_id": focus_folder_id or 0, "focus_locked": focus_locked or 0}
 
 
 @router.patch("/conversations/{conv_id}")
@@ -475,6 +481,39 @@ def get_upload_image(name: str):
     return FileResponse(str(path))
 
 
+@router.post("/conversations/{conv_id}/focus")
+def set_conversation_focus(conv_id: str, folder_id: int = Query(0),
+                           locked: int = Query(1), db: Session = Depends(get_db)):
+    """设置/取消会话的聚焦文件夹（沙箱作用域）。
+    folder_id=0 → 取消锁定，恢复「跟随当前文件」；locked=0 也等同解除锁定。
+    """
+    sess = db.query(ChatSession).filter(ChatSession.conv_id == conv_id).first()
+    if not sess:
+        raise HTTPException(404, "会话不存在")
+    if folder_id and not db.query(Folder).filter(
+            Folder.id == folder_id, Folder.deleted == 0).first():
+        raise HTTPException(404, "文件夹不存在")
+    sess.focus_folder_id = folder_id or 0
+    sess.focus_locked = 1 if (folder_id and locked) else 0
+    db.commit()
+    fld = db.query(Folder).filter(Folder.id == folder_id).first() if folder_id else None
+    return {"conversation_id": conv_id, "focus_folder_id": sess.focus_folder_id,
+            "focus_locked": sess.focus_locked,
+            "focus_folder_name": fld.name if fld else ""}
+
+
+@router.get("/conversations/{conv_id}/focus")
+def get_conversation_focus(conv_id: str, db: Session = Depends(get_db)):
+    sess = db.query(ChatSession).filter(ChatSession.conv_id == conv_id).first()
+    if not sess:
+        raise HTTPException(404, "会话不存在")
+    fid = getattr(sess, "focus_folder_id", 0) or 0
+    fld = db.query(Folder).filter(Folder.id == fid).first() if fid else None
+    return {"conversation_id": conv_id, "focus_folder_id": fid,
+            "focus_locked": getattr(sess, "focus_locked", 0) or 0,
+            "focus_folder_name": fld.name if fld else ""}
+
+
 @router.post("/conversations/{conv_id}/model")
 def set_conversation_model(conv_id: str, model: str = Query(...),
                            db: Session = Depends(get_db)):
@@ -598,6 +637,24 @@ async def send_message_stream(
             raise HTTPException(404, "绑定的文件不存在")
         if sess_row and getattr(sess_row, "file_id", 0) != file_id:
             sess_row.file_id = file_id
+            db.commit()
+
+    # ---- 沙箱分级：聚焦文件夹（共识 Q4b：跟随+可锁定） ----
+    # 锁定时用前端给的 folder_id；未锁定跟随当前文件所属文件夹；若会话已锁定则保持
+    focus_folder = 0
+    if focus_locked:
+        focus_folder = focus_folder_id or 0
+        if sess_row:
+            sess_row.focus_folder_id = focus_folder
+            sess_row.focus_locked = 1
+            db.commit()
+    else:
+        focus_folder = bound_file.folder_id if bound_file else 0
+        if sess_row and getattr(sess_row, "focus_locked", 0):
+            focus_folder = sess_row.focus_folder_id or 0   # 已被用户锁定，保持
+        elif sess_row:
+            sess_row.focus_folder_id = focus_folder or 0
+            sess_row.focus_locked = 0
             db.commit()
 
     # 会话级模型：会话行有 model 则用它，否则用全局主模型（llm_service 内部兜底）

@@ -18,6 +18,8 @@ const state = {
     convModel: '',       // 当前会话的模型（空 = 全局主模型）
     convEffort: '',      // 当前会话的思考强度（空 = 全局默认 high）
     globalModel: '',     // 全局主模型名（下拉兜底显示）
+    focusFolderId: 0,    // 锁定的学习范围文件夹（0 = 未锁定，跟随当前文件）
+    focusLocked: 0,      // 1 = 已锁定（复习/引导输出时用）
 };
 
 const API_BASE = localStorage.getItem('kaoyan_api_url') || '';
@@ -1027,6 +1029,11 @@ async function sendMessage() {
         fd.append('subtitle_context', state.mode === 'A' ? await getModeASubtitleContext() : '');
         fd.append('conversation_id', state.conversationId);
         // 文件中心：agent 上下文跟随当前查看的文件（页码/时间点一并传给编排器）
+        // 沙箱聚焦（共识 Q4b）：锁定状态下把聚焦文件夹一起传给后端
+        if (state.focusFolderId && state.focusLocked) {
+            fd.append('focus_folder_id', String(state.focusFolderId));
+            fd.append('focus_locked', '1');
+        }
         if (window.FSState && window.FSState.currentFileId()) {
             fd.append('file_id', String(window.FSState.currentFileId()));
             const _pos = window.FSState.currentPosition();

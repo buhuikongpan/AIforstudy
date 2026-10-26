@@ -306,6 +306,28 @@ LIST_ARTIFACTS_TOOL = {
 }
 ARTIFACT_TOOL_NAMES = {"read_artifact", "list_artifacts"}
 
+# 目录浏览工具（共识 Q2/Q3：AI 不知道精确路径 → list_files 列当前聚焦文件夹的目录树，文件名=课程元数据）
+LIST_FILES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_files",
+        "description": (
+            "List the files and folders in the current study scope (the folder the session is "
+            "focused on, or the folder of the file being viewed). Returns a tree: folders, then "
+            "files with name/kind/id. File names encode course metadata (e.g. '18.第16讲_03.无穷级数判别方法'). "
+            "Use this BEFORE read_artifact to see what is available and to know exact artifact names. "
+            "Optional args: keyword to filter by name substring; depth 1 = this folder only, depth 0 = whole tree."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "Filter by name substring (optional)"},
+                "depth": {"type": "integer", "description": "0 = full tree, 1 = current folder only. Default 0."},
+            },
+        },
+    },
+}
+
 # 章节摘要懒生成工具（共识 Q11：首次问到该章才生成并缓存）
 GEN_CHAPTER_TOOL = {
     "type": "function",
@@ -734,6 +756,77 @@ def _execute_artifact_tool(name: str, args: dict, file_id: int):
     return f"{fname} 内容如下：\n\n{text}"
 
 
+def _list_files_tool(args: dict, file_id: int, folder_id: int = 0) -> str:
+    """列出沙箱作用域（聚焦文件夹）内的目录树。文件名完整暴露（共识 Q3）。"""
+    from ..core.database import SessionLocal
+    from ..models import File as FileModel, Folder
+
+    db = SessionLocal()
+    try:
+        # 作用域：显式 folder_id 优先；否则当前文件所属文件夹；否则根
+        fid = folder_id or 0
+        if not fid and file_id:
+            f = db.query(FileModel).filter(FileModel.id == file_id).first()
+            if f:
+                fid = f.folder_id or 0
+
+        kw = str(args.get("keyword") or "").strip().lower()
+        depth = int(args.get("depth") or 0)
+
+        # 子树 id 集合（包含 fid 自身）
+        ids = [fid]
+        frontier = [fid] if fid else []
+        while frontier:
+            nxt = [x.id for x in db.query(Folder).filter(Folder.parent_id.in_(frontier)).all()
+                   if x.id not in ids]
+            ids += nxt
+            frontier = nxt
+
+        # 目录树
+        all_folders = db.query(Folder).filter(Folder.deleted == 0).all()
+        fmap = {}
+        for fl in all_folders:
+            fmap.setdefault(fl.parent_id, []).append(fl)
+
+        def walk(parent, d):
+            out = []
+            for fl in sorted(fmap.get(parent, []), key=lambda x: x.sort_order or 9999):
+                out.append(fl)
+                out.extend(walk(fl.id, d + 1))
+            return out
+
+        # 输出：文件夹（缩进）+ 文件（名字/kind）
+        lines = []
+        if depth == 1:
+            sub_folders = [fl for fl in fmap.get(fid, [])]
+            files = db.query(FileModel).filter(
+                FileModel.folder_id == fid, FileModel.deleted == 0).order_by(FileModel.name).all()
+        else:
+            sub_folders = [fl for fl in walk(fid if fid else 0, 0) if fl.parent_id == (fid if fid else 0)]
+            files = db.query(FileModel).filter(
+                FileModel.folder_id.in_(ids), FileModel.deleted == 0).order_by(FileModel.name).all()
+
+        for fl in sub_folders:
+            n = db.query(FileModel).filter(
+                FileModel.folder_id == fl.id, FileModel.deleted == 0).count()
+            lines.append(f"[文件夹] {fl.name}（{n} 个文件）")
+        for f in files:
+            if kw and kw not in f.name.lower():
+                continue
+            icon = {"video": "🎬", "pdf": "📕", "office": "📊", "image": "🖼️",
+                    "text": "📄", "markdown": "📝", "audio": "🎵"}.get(f.kind, "📦")
+            sz = "" if f.size <= 0 else f"（{f.size // 1024 // 1024}MB）" if f.size > 1048576 else f"（{f.size // 1024}KB）"
+            lines.append(f"{icon} {f.name}{sz} [id={f.id}]")
+        if not lines:
+            return "（当前聚焦范围内没有文件/文件夹。可用 list_files(depth=0) 查看整个范围）"
+        head = f"当前学习范围的文件清单（沙箱）："
+        if kw:
+            head = f"按「{kw}」过滤后的文件："
+        return head + chr(10) + chr(10).join(lines)
+    finally:
+        db.close()
+
+
 async def _gen_chapter_summary_tool(args: dict, file_id: int):
     """AI 触发的章节摘要懒生成：缓存命中直接回；否则 1 次 LLM 调用并落盘（计入闸门）"""
     from ..core.database import SessionLocal
@@ -784,16 +877,18 @@ async def _gen_chapter_summary_tool(args: dict, file_id: int):
     llm_record(file_id, "chapter", auto=True)
     return "已生成章节「" + ch["title"] + "」的学习摘要（已缓存，下次直接可用）：" + chr(10) + chr(10) + content
 
-async def execute_tool_call(name: str, args: dict, file_id: int = 0):
+async def execute_tool_call(name: str, args: dict, file_id: int = 0, folder_id: int = 0):
     """执行一次工具调用，返回 tool 消息的 content（字符串，或带图片的内容数组）
 
-    file_id: 会话绑定的当前文件 id（文件中心沙箱工具 read_artifact/list_artifacts 用；
-    传 0 表示会话未绑定文件，这两个工具不会被挂载）。
+    file_id: 会话绑定的当前文件 id（沙箱工具用；0=未绑定文件则 read_artifact/list_artifacts 不挂载）。
+    folder_id: 沙箱作用域 = 聚焦文件夹（list_files 用它列目录；0 时退化为当前文件所属文件夹）。
     """
     if name in ARTIFACT_TOOL_NAMES:
         if not file_id:
             raise ValueError("当前会话没有绑定文件")
         return _execute_artifact_tool(name, args, file_id)
+    if name == "list_files":
+        return _list_files_tool(args, file_id, folder_id)
     if name == "gen_chapter_summary":
         if not file_id:
             raise ValueError("当前会话没有绑定文件")

@@ -158,7 +158,12 @@
                 <div class="chat-header">
                     <span id="chatModeLabel">💬 即时问答</span>
                     <span class="chat-subject" id="chatSubjectLabel">📐 数学</span>
+                    <span class="focus-chip" id="focusChip" style="display:none">
+                        <span class="focus-chip-text" id="focusChipText"></span>
+                        <button class="focus-chip-x" onclick="FSTree.clearFocus()" title="解除锁定，改为跟随当前文件">✕</button>
+                    </span>
                     <div class="chat-header-actions">
+                        <button class="btn-sm" id="focusBtn" onclick="FSTree.pickFocusFolder()" title="锁定学习范围（选一个文件夹，AI 聚焦其中全部资料；适合复习/引导输出）" aria-label="锁定学习范围">🎯</button>
                         <button class="btn-sm" onclick="OrchestratorUI.preview()" title="上下文预览：看 agent 实际注入了哪些资料（透明化层）" aria-label="上下文预览">🧩</button>
                         <button class="btn-sm" onclick="toggleConversationList()" title="显示/隐藏对话列表" aria-label="显示或隐藏对话列表">☰</button>
                         <button class="btn-sm btn-primary-sm" onclick="newConversation()" title="新对话" aria-label="新建对话">＋</button>

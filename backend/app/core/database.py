@@ -62,6 +62,9 @@ def _migrate():
     add_column("chat_messages", "tool_call_id", "VARCHAR(64) DEFAULT ''")
     # 文件中心：会话可绑定文件（上下文跟随当前查看的文件）
     add_column("chat_sessions", "file_id", "INTEGER DEFAULT 0")
+    # 文件中心：沙箱分级（聚焦文件夹 + 锁定标志，共识 Q4b）
+    add_column("chat_sessions", "focus_folder_id", "INTEGER DEFAULT 0")
+    add_column("chat_sessions", "focus_locked", "INTEGER DEFAULT 0")
     # 文件中心：软删除（回收站）
     add_column("folders", "deleted", "INTEGER DEFAULT 0")
     # 动态科目：旧固定科目键迁移为顶层文件夹名（幂等）

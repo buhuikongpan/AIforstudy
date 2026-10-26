@@ -2199,3 +2199,19 @@ video::-webkit-media-controls { -webkit-appearance: none; appearance: none; }
 .model-picker-row label { display: none; }
 .model-picker-row select { flex: 1 1 0; min-width: 0; max-width: none; }
 .model-picker-row { flex-wrap: nowrap; }
+
+/* ===== 学习范围（沙箱）聚焦标签 ===== */
+.focus-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    max-width: 190px; padding: 2px 4px 2px 9px;
+    background: var(--color-primary-soft, #e8f0ff);
+    color: var(--color-primary); border-radius: var(--radius-pill, 999px);
+    font-size: 12px; font-weight: 500;
+}
+.focus-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.focus-chip-x {
+    border: none; background: none; cursor: pointer; color: inherit;
+    font-size: 11px; padding: 1px 4px; border-radius: 50%; line-height: 1;
+}
+.focus-chip-x:hover { background: rgba(0,0,0,.08); }
+#focusBtn.active { background: var(--color-primary-soft, #e8f0ff); color: var(--color-primary); }

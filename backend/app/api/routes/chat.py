@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from ...services.llm_service import (
     chat_completion_stream, execute_tool_call, UPLOAD_DIR, upload_image_block,
-    upload_public_url, READ_ARTIFACT_TOOL, LIST_ARTIFACTS_TOOL, GEN_CHAPTER_TOOL,
+    upload_public_url, READ_ARTIFACT_TOOL, LIST_ARTIFACTS_TOOL, GEN_CHAPTER_TOOL, LIST_FILES_TOOL,
 )
 from ...services.orchestrator import build_file_context
 from ...core.paths import resolve, to_rel
@@ -560,6 +560,9 @@ async def send_message_stream(
     watched_video_ids: str = Form(""),  # 模式B：勾选的视频ID（JSON 数组字符串）
     file_id: int = Form(0),   # 文件中心：当前查看的文件（上下文跟随文件，共识 D5）
     position: str = Form(""),  # 查看位置 JSON：{"page": 12} 或 {"time": 834.5}
+    # 沙箱分级（共识 Q4b）：聚焦文件夹；focus_locked=1 表示用户手动锁定（播放器切换不改变范围）
+    focus_folder_id: int = Form(0),
+    focus_locked: int = Form(0),
     # ask 工具回答（JSON 字符串 {"tool_call_id": "...", "answers": [{"id","selected","custom"}]}）：
     # 非空表示这一轮是"回答 AI 的提问"，后端把它作为 tool 结果续上继续推理
     ask_answers: str = Form(""),
@@ -753,7 +756,7 @@ async def send_message_stream(
             header = '\n--- 当前学习文件：' + bound_file.name + '（' + bound_file.kind + '） ---'
             subtitle_context = _truncate(header + "\n" + ctx["text"])
         # 沙箱工具保上限：让模型自己翻当前文件的产物（作用域锁死 artifacts/{file_id}/）
-        extra_tools = [READ_ARTIFACT_TOOL, LIST_ARTIFACTS_TOOL, GEN_CHAPTER_TOOL]
+        extra_tools = [READ_ARTIFACT_TOOL, LIST_ARTIFACTS_TOOL, GEN_CHAPTER_TOOL, LIST_FILES_TOOL]
 
     # 模式B：勾选视频的上下文——优先用「课程总结」（高密度、跨多节不爆上下文），
     # 没有总结的视频回退字幕全文；总量仍由 _truncate 兜底（1M 上下文下基本不触发）

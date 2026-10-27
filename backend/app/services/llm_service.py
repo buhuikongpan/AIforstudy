@@ -250,27 +250,64 @@ READ_TOOL = {
     "function": {
         "name": "read",
         "description": (
-            "Read a file from the study platform workspace. Images (jpg/jpeg/png/webp/gif/bmp) "
-            "are returned as the actual image, so you can look at them directly. Text files "
-            "(txt/md/srt/json/csv/py/js/... ) are returned as text. Use it to look at an uploaded "
-            "image mentioned earlier in the conversation, a subtitle file, a course summary, or a "
-            "source/data file. Pass a path relative to the project root (e.g. "
-            "storage/uploads/20261015_174805_845ddf84.jpg)."
+            "Read the study material of a file in the current scope.\n"
+            "- PREFERRED: pass file_id (ids come from list_files / grep results). This returns the "
+            "file's extracted text (or subtitles for videos) directly — no path needed, because study "
+            "materials live in a managed library and have no meaningful path for you to guess.\n"
+            "- Long text is paginated by lines: use offset/limit (default 2000 lines / 50KB; the "
+            "result tells you how to continue).\n"
+            "- path is optional: a plain-text note inside the scope (e.g. 'ch1.md'), "
+            "'artifacts/<file_id>/<name>' for a specific artifact, or an image (returned as an image)."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "file_id": {
+                    "type": "integer",
+                    "description": "File id from list_files/grep — reads its extracted text (or subtitles).",
+                },
                 "path": {
                     "type": "string",
-                    "description": "File path relative to the project root (or an absolute path inside it)",
+                    "description": "Optional. Plain-text note in scope, or 'artifacts/<id>/<name>', or an image path.",
                 },
+                "which": {
+                    "type": "string",
+                    "description": "For file_id: 'extracted' (default: full text/subtitles) or 'summary'.",
+                },
+                "offset": {"type": "integer", "description": "1-based start line. Default 1."},
+                "limit": {"type": "integer", "description": "Max lines. Default 2000."},
             },
-            "required": ["path"],
         },
     },
 }
 
-TOOLS = [ASK_TOOL, QUIZ_TOOL, READ_TOOL]
+# ================= grep：文件名 + 正文检索（沙箱内） =================
+GREP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "grep",
+        "description": (
+            "Search inside the current study scope (sandbox = the focused folder).\n"
+            "Searches BOTH file names and extracted text (artifacts) — e.g. searching '特征值' finds "
+            "files named after it AND pages mentioning it. Returns file name, page number (for "
+            "documents) and the matching line. Use it to locate which lecture/page covers a topic "
+            "before reading details.\n"
+            "Optional args: keyword (substring, case-insensitive); kind to restrict to video/pdf/office; "
+            "limit (default 30, max 60)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "Substring to search (case-insensitive)."},
+                "kind": {"type": "string", "description": "Restrict to a file kind: video|pdf|office|image|text|markdown"},
+                "limit": {"type": "integer", "description": "Max results. Default 30, max 60."},
+            },
+            "required": ["keyword"],
+        },
+    },
+}
+
+TOOLS = [ASK_TOOL, QUIZ_TOOL, READ_TOOL, GREP_TOOL]
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
 
@@ -292,6 +329,7 @@ READ_ARTIFACT_TOOL = {
             "properties": {
                 "name": {"type": "string", "description": "Artifact file name, e.g. summary.md / extracted.md"},
                 "page": {"type": "integer", "description": "Read a single page's text instead (1-based)"},
+                "file_id": {"type": "integer", "description": "Target file id inside the scope (default: the file being viewed)"},
             },
         },
     },
@@ -305,6 +343,13 @@ LIST_ARTIFACTS_TOOL = {
     },
 }
 ARTIFACT_TOOL_NAMES = {"read_artifact", "list_artifacts"}
+
+# read/read_artifact 可读的产物名。extracted.txt 是视频迁移遗留的旧字幕文本（共识 Q2 修复：
+# 之前白名单只有 .md，导致视频的提取文本永远读不到）
+READABLE_ARTIFACTS = {
+    "extracted.md", "extracted.txt", "summary.md", "overview.md",
+    "pages.json", "meta.json", "outline.json", "chunks.jsonl",
+}
 
 # 目录浏览工具（共识 Q2/Q3：AI 不知道精确路径 → list_files 列当前聚焦文件夹的目录树，文件名=课程元数据）
 LIST_FILES_TOOL = {
@@ -654,6 +699,174 @@ READ_DENY_NAMES = {".env", ".env.local", ".env.production", "id_rsa", "id_ed2551
 READ_DENY_SUFFIX = {".pem", ".key", ".p12", ".keystore", ".db", ".sqlite", ".db-wal", ".db-shm"}
 
 
+def _scope_file_ids(folder_id: int, file_id: int = 0) -> tuple:
+    """沙箱作用域：(范围内的 file_id 列表, 有效 folder_id)"""
+    from ..core.database import SessionLocal
+    from ..models import File as FileModel, Folder
+
+    db = SessionLocal()
+    try:
+        scope = folder_id or 0
+        if not scope and file_id:
+            f0 = db.query(FileModel).filter(FileModel.id == file_id).first()
+            if f0:
+                scope = f0.folder_id or 0
+        ids, frontier = [scope], ([scope] if scope else [])
+        while frontier:
+            nxt = [x.id for x in db.query(Folder).filter(Folder.parent_id.in_(frontier)).all()
+                   if x.id not in ids]
+            ids += nxt
+            frontier = nxt
+        files = db.query(FileModel).filter(
+            FileModel.folder_id.in_(ids), FileModel.deleted == 0).all() if ids else []
+        return [f.id for f in files], scope
+    finally:
+        db.close()
+
+
+def _read_text_paged(p: Path, offset: int = 1, limit: int = 2000) -> str:
+    """按行分页读文本（对齐 pi：offset/limit + 明确续读提示）"""
+    size = p.stat().st_size
+    if size > MAX_READ_BYTES:
+        raise ValueError("文件太大（%dKB），上限 %dMB" % (size // 1024, MAX_READ_BYTES // 1024 // 1024))
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        raise ValueError("读取失败：%s" % e)
+    if "\x00" in text[:2000]:
+        raise ValueError("这是二进制文件，无法按文本读取")
+    lines = text.splitlines() or [""]
+    total = len(lines)
+    off = max(1, int(offset or 1))
+    lim = max(1, min(int(limit or 2000), 5000))
+    chunk = lines[off - 1:off - 1 + lim]
+    body = "\n".join(chunk)
+    MAXB = 50 * 1024
+    if len(body.encode("utf-8")) > MAXB:
+        body = body.encode("utf-8")[:MAXB].decode("utf-8", "replace") + "\n…（达 50KB 上限被截断）"
+    head = "【%s】共 %d 行，本次第 %d–%d 行" % (p.name, total, off, min(off + lim - 1, total))
+    tail = ""
+    if off + lim - 1 < total:
+        tail = ("\n\n…（还有 %d 行；继续读：read(path=\"%s\", offset=%d, limit=%d)）"
+                % (total - (off + lim - 1), p.name, off + lim, lim))
+    return head + "\n\n" + body + tail
+
+
+def _artifact_for_file(fid: int, which: str = "extracted") -> Path:
+    """定位某文件的可读产物：视频优先 extracted.txt（迁移遗留），文档优先 extracted.md"""
+    d = Path(settings.artifacts_dir) / str(fid)
+    if which == "summary":
+        for n in ("summary.md", "overview.md"):
+            p = d / n
+            if p.is_file() and p.stat().st_size > 0:
+                return p
+        raise ValueError("该文件还没有总结（可让用户在 ⋯ 菜单生成，或改用 which='extracted'）")
+    for n in ("extracted.md", "extracted.txt", "pages.json"):
+        p = d / n
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    raise ValueError("该文件还没有可读的提取文本（可能仍在处理，或视频尚未提取字幕）")
+
+
+def _read_by_file_id(fid: int, which: str, offset: int, limit: int,
+                     file_id: int, folder_id: int) -> str:
+    """按 file_id 读沙箱内文件的可读内容（共识 Q1/Q3：不需要路径，支持范围内任意文件）"""
+    from ..core.database import SessionLocal
+    from ..models import File as FileModel
+
+    allowed, scope = _scope_file_ids(folder_id, file_id)
+    if allowed and fid not in allowed:
+        raise ValueError(
+            "文件 %d 不在当前学习范围（focus folder=%s）内。用 list_files 查看范围内文件，"
+            "或让用户在🎯里切换/扩大范围。" % (fid, scope))
+    db = SessionLocal()
+    try:
+        f = db.query(FileModel).filter(FileModel.id == fid, FileModel.deleted == 0).first()
+        if not f:
+            raise ValueError("文件 %d 不存在" % fid)
+        name, kind = f.name, f.kind
+    finally:
+        db.close()
+    art = _artifact_for_file(fid, which)
+    body = _read_text_paged(art, offset, limit)
+    return "文件：《%s》（%s，id=%d）\n%s" % (name, kind, fid, body)
+
+
+def _grep_tool(args: dict, file_id: int, folder_id: int) -> str:
+    """沙箱内 grep：文件名 + 提取正文。返回 文件/页码/命中行。"""
+    import json as _json
+    from ..core.database import SessionLocal
+    from ..models import File as FileModel
+
+    kw = str(args.get("keyword") or "").strip()
+    if not kw:
+        raise ValueError("keyword 不能为空")
+    k = kw.lower()
+    kind_filter = str(args.get("kind") or "").strip().lower()
+    limit = max(1, min(int(args.get("limit") or 30), 60))
+
+    allowed, scope = _scope_file_ids(folder_id, file_id)
+    db = SessionLocal()
+    try:
+        q = db.query(FileModel).filter(FileModel.deleted == 0)
+        if allowed:
+            q = q.filter(FileModel.id.in_(allowed))
+        if kind_filter:
+            q = q.filter(FileModel.kind == kind_filter)
+        metas = [(f.id, f.name, f.kind) for f in q.all()]
+    finally:
+        db.close()
+
+    hits = []
+    for fid, name, kind in metas:            # ① 文件名命中
+        if k in name.lower():
+            hits.append("文件名命中｜%s（%s，id=%d）" % (name, kind, fid))
+        if len(hits) >= limit:
+            break
+    for fid, name, kind in metas:            # ② 正文命中
+        if len(hits) >= limit:
+            break
+        d = Path(settings.artifacts_dir) / str(fid)
+        pj = d / "pages.json"
+        if pj.is_file():
+            try:
+                for pg in _json.loads(pj.read_text(encoding="utf-8")):
+                    for line in (pg.get("text") or "").splitlines():
+                        if k in line.lower():
+                            hits.append("p%s｜%s（id=%d）｜%s" % (
+                                pg.get("page"), name, fid, line.strip()[:160]))
+                            break
+                    if len(hits) >= limit:
+                        break
+                continue
+            except Exception:
+                pass
+        src = None
+        for n in ("extracted.md", "extracted.txt"):
+            p2 = d / n
+            if p2.is_file() and p2.stat().st_size > 0:
+                src = p2
+                break
+        if not src:
+            continue
+        try:
+            text = src.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if k in line.lower():
+                hits.append("第%d行｜%s（id=%d）｜%s" % (i, name, fid, line.strip()[:160]))
+                if len(hits) >= limit:
+                    break
+
+    if not hits:
+        return ("当前学习范围内没有匹配「%s」的文件名或正文。"
+                "可换关键词，或用 list_files 看有哪些资料。" % kw)
+    return ("在当前学习范围内搜索「%s」，命中 %d 条（范围 folder=%s）：\n\n%s\n\n"
+            "（读详情：read(file_id=<id>)）"
+            % (kw, len(hits), scope, "\n".join(hits)))
+
+
 def _safe_workspace_path(path: str) -> Path:
     """把模型给的路径限制在**项目根目录内**（read 工具可读工作区任意文件）。
 
@@ -884,17 +1097,33 @@ async def execute_tool_call(name: str, args: dict, file_id: int = 0, folder_id: 
     folder_id: 沙箱作用域 = 聚焦文件夹（list_files 用它列目录；0 时退化为当前文件所属文件夹）。
     """
     if name in ARTIFACT_TOOL_NAMES:
-        if not file_id:
-            raise ValueError("当前会话没有绑定文件")
-        return _execute_artifact_tool(name, args, file_id)
+        target = int(args.get("file_id") or 0) or file_id
+        if not target:
+            raise ValueError("当前会话没有绑定文件，请指定 file_id")
+        if target != file_id:
+            allowed, scope = _scope_file_ids(folder_id, file_id)
+            if allowed and target not in allowed:
+                raise ValueError("文件 %d 不在当前学习范围（focus folder=%s）内" % (target, scope))
+        return _execute_artifact_tool(name, args, target)
     if name == "list_files":
         return _list_files_tool(args, file_id, folder_id)
     if name == "gen_chapter_summary":
         if not file_id:
             raise ValueError("当前会话没有绑定文件")
         return await _gen_chapter_summary_tool(args, file_id)
+    if name == "grep":
+        return _grep_tool(args, file_id, folder_id)
+
     # read_image：旧名保留兼容（历史里可能有模型沿用旧工具名发的调用）
     if name in ("read", "read_image"):
+        # ① file_id 优先（共识 Q1：学习资料没有"路径"可猜，id 才是 AI 能拿到的）
+        want_fid = int(args.get("file_id") or 0)
+        if want_fid:
+            return _read_by_file_id(want_fid, str(args.get("which") or "extracted"),
+                                    int(args.get("offset") or 1), int(args.get("limit") or 2000),
+                                    file_id, folder_id)
+        if not (args.get("path") or "").strip():
+            raise ValueError("需要 file_id（推荐，来自 list_files/grep）或 path")
         p = _safe_workspace_path(args.get("path"))
         if p.suffix.lower() in IMAGE_EXTS:
             if p.stat().st_size > MAX_IMAGE_BYTES:

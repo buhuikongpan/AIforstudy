@@ -268,6 +268,49 @@ def build_file_context(file, position: Optional[dict] = None) -> dict:
     except Exception:
         pass
 
+    # 4.5) 范围清单（共识 Q3：注入「总览+清单状态」）
+    # 关键洞察（用户）：文件名本身就是人工整理的「讲次-主题」元数据，多个文件名连起来读
+    # 就能还原整体结构——所以这里列完整文件名 + 产物状态，不需要额外生成一份"讲次总览"文档。
+    try:
+        from ..models import File as FileModel, Folder
+        from ..core.database import SessionLocal
+        import os as _os
+        _scope = None
+        if position and isinstance(position, dict):
+            _scope = position.get("scope_folder_id")
+        if _scope:
+            _db = SessionLocal()
+            try:
+                _fld = _db.query(Folder).filter(Folder.id == _scope).first()
+                _rows = _db.query(FileModel).filter(
+                    FileModel.folder_id == _scope, FileModel.deleted == 0
+                ).order_by(FileModel.name).all()
+                if _rows:
+                    _lines = []
+                    for _r in _rows:
+                        _d = Path(settings.artifacts_dir) / str(_r.id)
+                        _marks = []
+                        if (_d / "extracted.txt").is_file() or (_d / "extracted.md").is_file() or (_d / "pages.json").is_file():
+                            _marks.append("正文可读")
+                        if (_d / "summary.md").is_file() or (_d / "overview.md").is_file():
+                            _marks.append("有总结")
+                        if (_d / "outline.json").is_file():
+                            _marks.append("有章节")
+                        _st = ("｜" + "·".join(_marks)) if _marks else "｜暂无提取"
+                        _lines.append("%s [id=%d]%s" % (_r.name, _r.id, _st))
+                    _txt = ("本区共 %d 个资料。文件名自带讲次与主题，按顺序读即可还原这一范围的结构；"
+                            "需要细节用 read(file_id=N)，找知识点用 grep。\n%s"
+                            % (len(_rows), "\n".join(_lines)))
+                    _txt = _txt[:1800]
+                    components.append({"key": "scope_manifest",
+                                       "label": "学习范围清单·" + ((_fld.name if _fld else str(_scope))),
+                                       "source": "files", "chars": len(_txt), "note": ""})
+                    parts.append("### 当前学习范围：" + ((_fld.name if _fld else str(_scope))) + chr(10) + _txt)
+            finally:
+                _db.close()
+    except Exception:
+        pass
+
     # 5) 关键词检索：position.hit_query（前端传问题文本）在 chunks 里检索相关片段
     if position and isinstance(position, dict) and position.get("hit_query"):
         try:

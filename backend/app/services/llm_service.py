@@ -127,6 +127,24 @@ SYSTEM_PROMPT = """你是一个考研学习辅导AI助手，正在帮助用户�
 能从字幕/历史/图片推断出来的一律自己推断，不要问。
 两个工具的共同格式：一次 1~3 个问题，各给稳定 id；选择类问题能列选项就列，推荐项放第一条并在标签末尾加 "(Recommended)"；文本尽量短，公式遵守上方铁律（$...$ / $$...$$），禁止 \(...\)；用户作答后接着正常作答，不要复述他的回答。
 
+## 工作区查询协议（回答前先定位，别凭空猜）
+
+你处在一个「学习工作区」里：用户会有多个科目 → 多个资料文件夹（如「线性代数/第3讲」）→ 每个文件夹里是学习资料文件。
+**关键：学习资料是托管文件，没有你能猜到的路径**。要查内容必须用工具，顺序如下：
+
+1. **list_files()** —— 先看当前范围有什么。返回每个文件的**完整文件名**（文件名本身写着讲次与主题，如
+   `05.第3讲_02.第3讲一、线性代数中的一号人物——向量02.mp4`）+ 产物状态（正文可读/有总结/有章节）。
+   把多个文件名连起来读，就能判断这一讲/这份资料的整体结构，**不需要额外找"总览文档"**。
+2. **grep(keyword)** —— 要确认某个知识点在哪一节/哪一页时用。同时搜文件名与正文，返回文件 id 与页码。
+3. **read(file_id=N)** —— 读某个文件的提取正文（视频=字幕），`which="summary"` 读它的总结；
+   长文本用 `offset`/`limit` 分页。**这是你唯一正确的读文件方式**（不要去猜路径）。
+4. **read_artifact(file_id=N, name=...) / outline** —— 需要精确产物时用（summary.md / pages.json / outline.json）。
+
+范围说明：除非用户在🎯里锁定，否则「当前范围」跟随用户正在看的文件所在文件夹。
+范围外的文件会被拒绝——这时应告知用户「这不在当前学习范围」，并建议在🎯里切换，不要反复换路径硬试。
+
+**回答涉及"这一讲讲什么/有哪些内容/某个知识点在哪"时，先 list_files 再回答**；问具体细节时再 read。
+
 ## read 工具（要主动看文件时用）
 用户上传的图片**已经直接附在消息里**，你当轮就能看到，不需要也不应该为此调用工具。
 需要主动查看工作区里的其它文件时，用 read：
@@ -1028,14 +1046,25 @@ def _list_files_tool(args: dict, file_id: int, folder_id: int = 0) -> str:
                 continue
             icon = {"video": "🎬", "pdf": "📕", "office": "📊", "image": "🖼️",
                     "text": "📄", "markdown": "📝", "audio": "🎵"}.get(f.kind, "📦")
-            sz = "" if f.size <= 0 else f"（{f.size // 1024 // 1024}MB）" if f.size > 1048576 else f"（{f.size // 1024}KB）"
-            lines.append(f"{icon} {f.name}{sz} [id={f.id}]")
+            # 产物状态：AI 据此知道「这个文件能读什么」，不必先试错
+            d = Path(settings.artifacts_dir) / str(f.id)
+            marks = []
+            if (d / "extracted.txt").is_file() or (d / "extracted.md").is_file() or (d / "pages.json").is_file():
+                marks.append("正文可读")
+            if (d / "summary.md").is_file() or (d / "overview.md").is_file():
+                marks.append("有总结")
+            if (d / "outline.json").is_file():
+                marks.append("有章节")
+            status = ("｜" + "·".join(marks)) if marks else "｜暂无提取内容"
+            lines.append(f"{icon} {f.name} [id={f.id}]{status}")
         if not lines:
             return "（当前聚焦范围内没有文件/文件夹。可用 list_files(depth=0) 查看整个范围）"
-        head = f"当前学习范围的文件清单（沙箱）："
+        # 文件名 = 人工整理的「讲次-主题」元数据，是全清单里最有用的信息：
+        # 多个文件名连起来读，就能还原这一讲/这本资料的整体结构（不需要额外的摘要文档）
+        head = "当前学习范围（沙箱）的文件清单。文件名自带讲次与主题，按顺序读即可还原整体结构："
         if kw:
             head = f"按「{kw}」过滤后的文件："
-        return head + chr(10) + chr(10).join(lines)
+        return head + chr(10) + chr(10) + chr(10).join(lines)
     finally:
         db.close()
 

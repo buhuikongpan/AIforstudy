@@ -660,6 +660,12 @@ async def send_message_stream(
             sess_row.focus_locked = 0
             db.commit()
 
+    # 把聚焦文件夹传给编排器 → 注入「范围清单」（文件名+产物状态，共识 Q3）
+    if focus_folder:
+        if file_position is None:
+            file_position = {}
+        file_position['scope_folder_id'] = focus_folder
+
     # 会话级模型：会话行有 model 则用它，否则用全局主模型（llm_service 内部兜底）
     conv_model = sess_row.model.strip() if sess_row and sess_row.model else ""
     conv_effort = sess_row.effort.strip() if sess_row and sess_row.effort else ""

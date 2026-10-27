@@ -780,6 +780,25 @@ async def send_message_stream(
             subtitle_context = _truncate(header + "\n" + ctx["text"])
         # 沙箱工具保上限：让模型自己翻当前文件的产物（作用域锁死 artifacts/{file_id}/）
         extra_tools = [READ_ARTIFACT_TOOL, LIST_ARTIFACTS_TOOL, GEN_CHAPTER_TOOL, LIST_FILES_TOOL]
+    elif focus_folder:
+        # 没打开文件、但已锁定学习范围（复习场景）：仍需注入「范围清单 + 科目地图」。
+        # 否则 AI 手里只有科目地图，会把整本书的概览误当成当前范围（实测踩到）。
+        try:
+            from ...services.orchestrator import build_scope_manifest, build_subject_map_part
+            _parts = []
+            _man = build_scope_manifest(focus_folder)
+            if _man:
+                _parts.append(_man)
+            _smap = build_subject_map_part(focus_folder)
+            if _smap:
+                _parts.append(_smap)
+            if _parts:
+                subtitle_context = _truncate(chr(10) + chr(10).join(_parts))
+        except Exception as _e:
+            print(f"  [chat] 无文件时范围注入失败: {_e}")
+        # list_files 在这里挂载（有文件时已在上方挂载过，避免重复/遗漏）
+        if LIST_FILES_TOOL not in extra_tools:
+            extra_tools.append(LIST_FILES_TOOL)
 
     # 模式B：勾选视频的上下文——优先用「课程总结」（高密度、跨多节不爆上下文），
     # 没有总结的视频回退字幕全文；总量仍由 _truncate 兜底（1M 上下文下基本不触发）

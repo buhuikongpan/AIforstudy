@@ -148,6 +148,76 @@ def _position_content(file, position: dict) -> str:
     return ""
 
 
+def build_scope_manifest(folder_id: int, limit_chars: int = 1800) -> str:
+    """范围清单：聚焦文件夹内的完整文件名 + 产物状态。
+
+    为什么列文件名就够（用户洞察）：文件名本身是人工整理的「讲次-主题」元数据，
+    多个文件名连起来读即可还原这一范围的结构，不需要额外生成「讲次总览」文档。
+    """
+    from ..models import File as FileModel, Folder
+    from ..core.database import SessionLocal
+    if not folder_id:
+        return ""
+    db = SessionLocal()
+    try:
+        fld = db.query(Folder).filter(Folder.id == folder_id).first()
+        rows = db.query(FileModel).filter(
+            FileModel.folder_id == folder_id, FileModel.deleted == 0
+        ).order_by(FileModel.name).all()
+        if not rows:
+            return ""
+        lines = []
+        for r in rows:
+            d = Path(settings.artifacts_dir) / str(r.id)
+            marks = []
+            if (d / "extracted.txt").is_file() or (d / "extracted.md").is_file() or (d / "pages.json").is_file():
+                marks.append("正文可读")
+            if (d / "summary.md").is_file() or (d / "overview.md").is_file():
+                marks.append("有总结")
+            if (d / "outline.json").is_file():
+                marks.append("有章节")
+            st = ("｜" + "·".join(marks)) if marks else "｜暂无提取"
+            lines.append("%s [id=%d]%s" % (r.name, r.id, st))
+        name = fld.name if fld else str(folder_id)
+        _head = "### 当前学习范围：" + str(name)
+        _body = "%s" % chr(10).join([
+            "本区共 %d 个资料。文件名自带讲次与主题，按顺序读即可还原这一范围的结构；" % len(rows),
+            "需要细节用 read(file_id=N)，找知识点用 grep。",
+            chr(10).join(lines),
+        ])
+        txt = _head + chr(10) + _body
+        return txt[:limit_chars]
+    finally:
+        db.close()
+
+
+def build_subject_map_part(folder_id: int, limit_chars: int = 400) -> str:
+    """科目知识地图片段（沿文件夹上溯到顶层科目）"""
+    from ..models import Folder
+    from ..core.database import SessionLocal
+    from .doc_index import get_subject_map
+    if not folder_id:
+        return ""
+    db = SessionLocal()
+    try:
+        cur, top, hops = folder_id, None, 0
+        while cur and hops < 64:
+            f = db.query(Folder).filter(Folder.id == cur).first()
+            if not f:
+                break
+            top = f
+            cur = f.parent_id
+            hops += 1
+        if not top:
+            return ""
+        m = get_subject_map(top.name)
+        if not m.strip():
+            return ""
+        return "### 科目知识地图（" + str(top.name) + "）" + chr(10) + m[:limit_chars]
+    finally:
+        db.close()
+
+
 def build_file_context(file, position: Optional[dict] = None) -> dict:
     """按模板为文件构建注入上下文。
 

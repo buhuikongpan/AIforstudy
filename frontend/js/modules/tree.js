@@ -670,9 +670,39 @@ const FSTree = {
             state.focusLocked = d.focus_locked || 0;
         }
         this.renderFocusChip(d.focus_folder_id, d.focus_folder_name, d.focus_locked);
+        // ---- 联动：树选中 + 展开父链 + 滚动定位 + 上传目标跟随 ----
+        if (d.focus_locked && d.focus_folder_id) this.revealFolder(d.focus_folder_id);
         addSystemMessage(d.focus_locked
             ? `🎯 学习范围已锁定：${d.focus_folder_name}（AI 将聚焦该文件夹的全部资料）`
             : '🎯 已解除锁定，学习范围恢复为跟随当前文件');
+    },
+
+    /** 在树中展开并高亮某文件夹（联动用：锁定范围后让用户看到它） */
+    revealFolder(folderId) {
+        if (!this.cache) return;
+        // 展开祖先链，让该节点可见
+        const walk = (fs, chain) => {
+            for (const f of fs) {
+                const next = chain.concat([f.id]);
+                if (f.id === folderId) return next;
+                const r = walk(f.children || [], next);
+                if (r) return r;
+            }
+            return null;
+        };
+        const chain = walk(this.cache.folders || [], []);
+        if (chain) {
+            for (const id of chain) this.expanded[id] = true;
+        }
+        this.selectedFolderId = folderId;          // 上传目标跟随
+        const hint = document.getElementById('fsTargetHint');
+        if (hint) hint.textContent = '📁 ' + (this._folderName(folderId) || folderId);
+        this.render();
+        // 滚动到可见
+        setTimeout(() => {
+            const el = document.querySelector(`.tree-folder-label[data-fid="${folderId}"]`);
+            if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }, 120);
     },
 
     async clearFocus() {

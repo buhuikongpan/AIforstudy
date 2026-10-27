@@ -446,12 +446,29 @@ def get_history(conv_id: str, db: Session = Depends(get_db)):
 
 @router.get("/context-preview")
 def context_preview(file_id: int = Query(...), page: int = Query(0),
-                    time: float = Query(0), db: Session = Depends(get_db)):
-    """上下文实时预览（透明化层，共识 D5）：返回当前文件实际会注入的产物明细"""
+                    time: float = Query(0), conv_id: str = Query(""),
+                    db: Session = Depends(get_db)):
+    """上下文实时预览（透明化层，共识 D5）：返回当前文件实际会注入的产物明细。
+
+    conv_id 非空时按该会话的聚焦文件夹注入（与 send-stream 的真实注入保持一致）。
+    """
     f = db.query(FileModel).filter(FileModel.id == file_id, FileModel.deleted == 0).first()
     if not f:
         raise HTTPException(404, "文件不存在")
-    position = {"page": page} if page else ({"time": time} if time else None)
+    position = {}
+    if page:
+        position["page"] = page
+    elif time:
+        position["time"] = time
+    # 会话聚焦文件夹 → 范围清单组件（否则预览会比实际少一块）
+    if conv_id:
+        sess = db.query(ChatSession).filter(ChatSession.conv_id == conv_id).first()
+        if sess:
+            focus = (getattr(sess, "focus_folder_id", 0) or 0) if getattr(sess, "focus_locked", 0) else (f.folder_id or 0)
+            if focus:
+                position["scope_folder_id"] = focus
+    if not position:
+        position = None
     ctx = build_file_context(f, position)
     return {
         "file_id": file_id, "file_name": f.name, "kind": f.kind, "status": f.status,

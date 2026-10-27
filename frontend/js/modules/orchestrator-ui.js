@@ -27,6 +27,10 @@ const OrchestratorUI = {
         }
         const pos = window.Viewer ? window.Viewer.currentPosition() : null;
         const qs = new URLSearchParams({ file_id: cur.id });
+        // 带上会话 → 后端按会话的聚焦文件夹生成（预览必须与 AI 实际注入一致）
+        if (typeof state !== 'undefined' && state.conversationId) {
+            qs.set('conv_id', state.conversationId);
+        }
         if (pos && pos.page) qs.set('page', pos.page);
         if (pos && pos.time) qs.set('time', pos.time);
         const resp = await apiFetch(`/api/chat/context-preview?${qs}`);
